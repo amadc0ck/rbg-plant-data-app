@@ -2072,11 +2072,196 @@ async function runIrisImport() {
   render();
 }
 
-/* ---- import: screen ---- */
+function renderImportScreen() {
+  const st = state.importState;
+  const picker = `<label class="btn primary" style="display:inline-block">Choose IrisBG export (.xlsx)<input type="file" id="iris-file" accept=".xlsx" hidden></label>`;
+  if (!st) {
+    return `<p class="muted">Upload the IrisBG report. Nothing is saved until you've seen the preview and confirmed.</p>${picker}
+      <p class="faint">Columns are read in this order: ${IRIS_FIELDS.join(", ")}.</p>`;
+  }
+  if (st.phase === "reading") return `<p>Reading <strong>${esc(st.fileName)}</strong>…</p>`;
+  if (st.phase === "error") return `<div class="notice bad">Couldn't read ${esc(st.fileName)}: ${esc(st.error)}</div>${picker}`;
+  if (st.phase === "preview") {
+    const { plan } = st;
+    const stat = (n, l) => `<div class="stat"><div class="n">${Number(n).toLocaleString()}</div><div class="l">${esc(l)}</div></div>`;
+    return `<h3 class="page-title" style="font-size:19px">Preview: ${esc(st.fileName)}</h3>
+      <p class="muted">${st.rowsRead.toLocaleString()} rows read · ${plan.parsed.items.length.toLocaleString()} plant items in ${plan.accs.size.toLocaleString()} accessions · columns mapped by ${esc(plan.parsed.mappedBy)}</p>
+      <h4>Accessions</h4><div class="stat-grid">${stat(plan.acc.new, "new")}${stat(plan.acc.changed, "changed")}${stat(plan.acc.unchanged, "unchanged")}${stat(plan.acc.missing, "not in this file (will be flagged)")}</div>
+      <h4>Plantings (items)</h4><div class="stat-grid">${stat(plan.pl.new, "new")}${stat(plan.pl.changed, "changed")}${stat(plan.pl.unchanged, "unchanged")}${stat(plan.pl.missing, "not in this file (will be flagged)")}</div>
+      ${plan.conflicts.length ? `<div class="notice">${plan.conflicts.length} accession(s) have items with different plant names; the first name is used.<details><summary>Show</summary><div class="faint">${plan.conflicts.slice(0, 100).map(esc).join("<br>")}</div></details></div>` : ""}
+      ${plan.parsed.bad.length ? `<div class="notice bad">${plan.parsed.bad.length} row(s) can't be imported and will be skipped.<details><summary>Show</summary><div class="faint">${plan.parsed.bad.slice(0, 100).map((b) => `Row ${b.rowNo}: ${esc(b.reason)}`).join("<br>")}</div></details></div>` : ""}
+      <div class="notice good">Status, GPS points and notes on existing plantings are never changed by an import, and nothing is deleted.</div>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="btn primary" data-action="run-import">Import ${plan.parsed.items.length.toLocaleString()} items</button><button class="btn" data-action="cancel-import">Cancel</button></div>`;
+  }
+  if (st.phase === "writing") {
+    return `<h3>Importing ${esc(st.fileName)}…</h3><div class="progress"><div id="import-bar"></div></div><p class="faint" id="import-progress-label">Starting…</p><p class="faint">Keep this tab open until it finishes.</p>`;
+  }
+  const log = (st.written || []).map((w) => `<li>${esc(w)}</li>`).join("");
+  if (st.phase === "failed") {
+    return `<div class="notice bad"><strong>The import stopped part-way:</strong> ${esc(st.error)}</div>
+      <p>What was written before it stopped:</p><ul>${log || "<li>Nothing.</li>"}</ul>
+      <p class="muted">Re-running the same file is safe: accessions and plantings are matched by number, so it picks up where this left off.</p>${picker}`;
+  }
+  return `<div class="notice good">Import complete.</div><ul>${log}</ul><button class="btn" data-action="cancel-import">Import another file</button>`;
+}
 
-/* ==================== GARDEN LOCATIONS ==================== */
+/* ==================== GARDEN LOCATIONS ====================
+   Bed and sub-area codes come from IrisBG ("H", "H-W", "ESH-CB"). Staff
+   give each a real name here; sub-areas default their parent to the bed
+   they were seen under.
+   ========================================================= */
+function renderLocations() {
+  const counts = new Map();
+  for (const pl of state.data.plantings) {
+    for (const [code, parent] of [[pl.bed, null], [pl.sub_location, pl.bed]]) {
+      if (!code) continue;
+      const e = counts.get(code) || { code, parent, n: 0 };
+      e.n++;
+      counts.set(code, e);
+    }
+  }
+  const named = new Map(state.data.garden_locations.map((g) => [g.code, g]));
+  for (const g of state.data.garden_locations) if (!counts.has(g.code)) counts.set(g.code, { code: g.code, parent: g.parent_code, n: 0 });
+  const list = [...counts.values()].sort((a, b) => String(a.parent || a.code).localeCompare(String(b.parent || b.code), undefined, { numeric: true }) || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.code.localeCompare(b.code, undefined, { numeric: true }));
+  if (!list.length) return `<h1 class="page-title">Garden locations</h1><div class="empty">Location codes appear here after the first IrisBG import.</div>`;
+  const unnamed = list.filter((l) => !(named.get(l.code) || {}).name).length;
+  return `<h1 class="page-title">Garden locations</h1>
+    <p class="muted">${list.length} codes from IrisBG · ${unnamed} still need a name. Names save when you leave the field.</p>
+    <div class="table-wrap"><table class="sheet"><thead><tr><th>Code</th><th>Within</th><th>Plantings</th><th>Name</th><th>Notes</th></tr></thead><tbody>
+    ${list.map((l) => { const g = named.get(l.code) || {}; return `<tr><td><strong>${esc(l.code)}</strong></td><td>${esc(g.parent_code || l.parent || "")}</td><td>${l.n}</td>
+      <td><input class="input" data-loc="${attr(l.code)}" data-parent="${attr(g.parent_code || l.parent || "")}" data-col="name" value="${attr(g.name || "")}" placeholder="e.g. Entry Garden"></td>
+      <td><input class="input" data-loc="${attr(l.code)}" data-parent="${attr(g.parent_code || l.parent || "")}" data-col="notes" value="${attr(g.notes || "")}"></td></tr>`; }).join("")}
+    </tbody></table></div>`;
+}
+
+async function saveLocation(input) {
+  const code = input.dataset.loc;
+  const g = state.data.garden_locations.find((x) => x.code === code) || {};
+  const value = norm(input.value);
+  if ((g[input.dataset.col] || null) === value) return;
+  const parent = input.dataset.parent || null;
+  try {
+    // A sub-area's parent must exist first (foreign key), so make sure it does.
+    if (parent && !state.data.garden_locations.some((x) => x.code === parent)) await db.insert("garden_locations", [{ code: parent }], { onConflict: "code", returning: false });
+    await db.insert("garden_locations", [{ code, parent_code: parent, name: g.name || null, notes: g.notes || null, [input.dataset.col]: value }], { onConflict: "code", returning: false });
+    await reloadTables("garden_locations");
+    toast(`Saved ${code}.`);
+  } catch (e) { toast(`Couldn't save ${code}: ${e.message}`, true); }
+}
 
 /* ==================== ADMIN: PICKLISTS, STAFF, IMPORT HISTORY ==================== */
+const LIST_LABELS = { plant_type: "Plant type", light_needs: "Light needs", water_needs: "Water needs", blooming_season: "Blooming season" };
+const LIST_COLUMN = { plant_type: "plant_type", light_needs: "light_needs", water_needs: "water_needs", blooming_season: "blooming_season" };
+
+function renderAdmin() {
+  if (!state.me?.is_admin) return `<div class="empty">Admins only.</div>`;
+  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["picklists", "Picklists"], ["staff", "Staff"]];
+  const body = { import: renderImportScreen, history: renderImportHistory, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
+  return `<h1 class="page-title">Admin</h1>
+    <div class="seg" style="margin:6px 0 16px">${tabs.map(([t, l]) => `<button class="${state.adminTab === t ? "active" : ""}" data-action="admin-tab" data-tab="${t}">${l}</button>`).join("")}</div>${body()}`;
+}
+
+function renderImportHistory() {
+  const list = [...state.data.irisbg_imports].sort((a, b) => String(b.imported_at).localeCompare(String(a.imported_at)));
+  if (!list.length) return `<div class="empty">No IrisBG imports yet.</div>`;
+  return `<div class="table-wrap"><table class="sheet"><thead><tr><th>When</th><th>File</th><th>By</th><th>Summary</th></tr></thead><tbody>
+    ${list.map((i) => `<tr><td>${esc(fmtDateTime(i.imported_at))}</td><td>${esc(i.file_name)}</td><td>${esc(shortEmail(i.imported_by))}</td>
+      <td class="faint">${Object.entries(i.summary || {}).map(([k, v]) => `${esc(k.replace(/_/g, " "))}: ${esc(v)}`).join(" · ")}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function taxaUsing(list, value) {
+  const col = LIST_COLUMN[list];
+  return state.data.taxa.filter((t) => (Array.isArray(t[col]) ? t[col].includes(value) : t[col] === value));
+}
+
+function renderPicklists() {
+  return Object.entries(LIST_LABELS).map(([list, label]) => {
+    const opts = state.data.list_options.filter((o) => o.list === list).sort((a, b) => a.sort - b.sort || a.value.localeCompare(b.value));
+    return `<div class="box"><h3 style="font-family:var(--serif);margin:0 0 8px">${label}</h3>
+      ${opts.map((o, i) => { const used = taxaUsing(list, o.value).length; return `<div class="row-between" style="padding:3px 0">
+        <input class="input" style="max-width:280px" data-rename-list="${list}" data-old="${attr(o.value)}" value="${attr(o.value)}">
+        <span class="faint">${used ? `used by ${used}` : "unused"}</span>
+        <span><button class="btn small" data-action="move-opt" data-list="${list}" data-value="${attr(o.value)}" data-dir="-1" ${i === 0 ? "disabled" : ""}>↑</button>
+          <button class="btn small" data-action="move-opt" data-list="${list}" data-value="${attr(o.value)}" data-dir="1" ${i === opts.length - 1 ? "disabled" : ""}>↓</button>
+          <button class="btn small danger" data-action="delete-opt" data-list="${list}" data-value="${attr(o.value)}" ${used ? `disabled title="In use — rename it instead"` : ""}>Delete</button></span></div>`; }).join("")}
+      <form class="row-between" data-add-opt="${list}" style="margin-top:6px;justify-content:flex-start"><input class="input" style="max-width:280px" name="value" placeholder="Add a value"><button class="btn small">Add</button></form>
+    </div>`;
+  }).join("");
+}
+
+async function addOption(form) {
+  const list = form.dataset.addOpt;
+  const value = norm(new FormData(form).get("value"));
+  if (!value) return;
+  const max = state.data.list_options.filter((o) => o.list === list).reduce((m, o) => Math.max(m, o.sort), 0);
+  try { await db.insert("list_options", [{ list, value, sort: max + 1 }], { returning: false }); await reloadTables("list_options"); renderMain(); }
+  catch (e) { toast(`Couldn't add: ${e.message}`, true); }
+}
+
+// Renaming updates every curated record using the old value first, so no
+// taxon is left pointing at a value that no longer exists.
+async function renameOption(input) {
+  const list = input.dataset.renameList, old = input.dataset.old, value = norm(input.value);
+  if (!value || value === old) { input.value = old; return; }
+  const col = LIST_COLUMN[list];
+  const users = taxaUsing(list, old);
+  if (users.length && !confirmAction(`Rename “${old}” to “${value}”? ${plural(users.length, "curated record")} will be updated.`)) { input.value = old; return; }
+  try {
+    const o = state.data.list_options.find((x) => x.list === list && x.value === old);
+    await db.insert("list_options", [{ list, value, sort: o ? o.sort : 0 }], { returning: false });
+    for (const t of users) {
+      const next = Array.isArray(t[col]) ? t[col].map((v) => (v === old ? value : v)) : value;
+      await db.update("taxa", { id: t.id }, { [col]: next });
+    }
+    await db.remove("list_options", { list, value: old });
+    await reloadTables("list_options", "taxa");
+    toast(`Renamed to “${value}”.`);
+    renderMain();
+  } catch (e) { toast(`Couldn't rename: ${e.message}`, true); input.value = old; }
+}
+
+async function moveOption(list, value, dir) {
+  const opts = state.data.list_options.filter((o) => o.list === list).sort((a, b) => a.sort - b.sort || a.value.localeCompare(b.value));
+  const i = opts.findIndex((o) => o.value === value), j = i + dir;
+  if (i < 0 || j < 0 || j >= opts.length) return;
+  [opts[i], opts[j]] = [opts[j], opts[i]];
+  try {
+    await Promise.all(opts.map((o, k) => db.update("list_options", { list, value: o.value }, { sort: k + 1 })));
+    await reloadTables("list_options"); renderMain();
+  } catch (e) { toast(`Couldn't reorder: ${e.message}`, true); }
+}
+
+async function deleteOption(list, value) {
+  if (taxaUsing(list, value).length) return;
+  try { await db.remove("list_options", { list, value }); await reloadTables("list_options"); renderMain(); }
+  catch (e) { toast(`Couldn't delete: ${e.message}`, true); }
+}
+
+function renderStaff() {
+  const list = [...state.data.staff].sort((a, b) => a.email.localeCompare(b.email));
+  return `<p class="muted">People on this list can sign in with the Google account for that email address.</p>
+    <div class="table-wrap"><table class="sheet"><thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Added</th><th></th></tr></thead><tbody>
+    ${list.map((s) => `<tr><td>${esc(s.email)}</td><td>${esc(s.display_name || "")}</td>
+      <td><input type="checkbox" data-action="toggle-admin" data-email="${attr(s.email)}" ${s.is_admin ? "checked" : ""} ${s.email === state.me.email ? "disabled title='You can’t change your own admin role'" : ""}></td>
+      <td class="faint">${esc(fmtDate(s.added_at))}${s.added_by ? ` by ${esc(shortEmail(s.added_by))}` : ""}</td>
+      <td>${s.email === state.me.email ? "" : `<button class="btn small danger" data-action="remove-staff" data-email="${attr(s.email)}">Remove</button>`}</td></tr>`).join("")}
+    </tbody></table></div>
+    <form id="add-staff" class="box" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input class="input" style="max-width:260px" name="email" type="email" placeholder="name@example.org" required>
+      <input class="input" style="max-width:200px" name="display_name" placeholder="Name (optional)">
+      <label><input type="checkbox" name="is_admin"> Admin</label>
+      <button class="btn primary">Add staff member</button></form>`;
+}
+
+async function addStaff(form) {
+  const f = new FormData(form);
+  const email = String(f.get("email") || "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("Enter a valid email address.", true); return; }
+  try {
+    await db.insert("staff", [{ email, display_name: norm(f.get("display_name")), is_admin: !!f.get("is_admin"), added_by: state.me.email }], { returning: false });
+    await reloadTables("staff"); toast(`${email} can now sign in.`); renderMain();
+  } catch (e) { toast(`Couldn't add: ${e.message}`, true); }
+}
 
 /* ==================== EVENTS ==================== */
 
