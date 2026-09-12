@@ -1,0 +1,1683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RBG Plant Collection Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ================================================================
+   PALETTE — every colour in the app comes from these variables.
+   Taken from the mockup: forest-green header, cream page, white cards,
+   terracotta for bloom, sage for "curated / good", gold for warnings.
+   ================================================================ */
+:root {
+  --forest: #2f4a3a;
+  --forest-deep: #22382b;
+  --forest-soft: #3f5f4b;
+  --cream: #f6f2e9;
+  --cream-deep: #ece6d8;
+  --paper: #ffffff;
+  --ink: #1f2a24;
+  --ink-soft: #5d6a61;
+  --ink-faint: #8c968f;
+  --line: #e3ddd0;
+  --sage: #e1eadf;
+  --sage-ink: #2f5a3e;
+  --terracotta: #b8502f;
+  --terracotta-soft: #f7e3dc;
+  --gold: #8a6414;
+  --gold-soft: #f5ead2;
+  --sky: #e3ecef;
+  --sky-ink: #37596a;
+  --danger: #a33a2a;
+  --danger-soft: #f8e1dc;
+  --shadow: 0 1px 2px rgba(31, 42, 36, 0.06), 0 2px 8px rgba(31, 42, 36, 0.05);
+  --radius: 12px;
+  --serif: "Fraunces", Georgia, "Times New Roman", serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font-family: var(--sans); font-size: 14px; color: var(--ink); background: var(--cream); line-height: 1.45; }
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+a { color: var(--sage-ink); }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+
+/* ---------------- header ---------------- */
+.topbar { background: var(--forest); color: var(--cream); display: flex; align-items: center; gap: 18px; padding: 10px 22px; position: sticky; top: 0; z-index: 30; }
+.brand { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.brand-mark { width: 34px; height: 34px; }
+.brand-name { font-family: var(--serif); font-size: 19px; font-weight: 600; letter-spacing: 0.2px; }
+.brand-sub { font-size: 11px; opacity: 0.75; }
+.search { flex: 1; max-width: 520px; margin-left: auto; position: relative; }
+.search input { width: 100%; border: 0; border-radius: 8px; padding: 9px 12px 9px 34px; background: var(--paper); color: var(--ink); }
+.search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--ink-faint); }
+.userbox { display: flex; align-items: center; gap: 10px; font-size: 12px; white-space: nowrap; }
+.userbox button { background: transparent; border: 1px solid rgba(246, 242, 233, 0.4); color: var(--cream); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+
+.nav { background: var(--forest-deep); display: flex; gap: 2px; padding: 0 16px; overflow-x: auto; position: sticky; top: 54px; z-index: 29; }
+.nav button { background: transparent; border: 0; color: rgba(246, 242, 233, 0.75); padding: 10px 14px; cursor: pointer; border-bottom: 3px solid transparent; white-space: nowrap; font-weight: 500; }
+.nav button.active { color: var(--cream); border-bottom-color: var(--cream); }
+.nav .count { background: rgba(246, 242, 233, 0.16); border-radius: 10px; padding: 1px 7px; margin-left: 6px; font-size: 11px; }
+.nav .spacer { flex: 1; }
+.nav .synced { color: rgba(246, 242, 233, 0.6); font-size: 11px; align-self: center; white-space: nowrap; padding-right: 6px; }
+
+/* ---------------- layout ---------------- */
+.layout { display: flex; align-items: flex-start; }
+.main { flex: 1; min-width: 0; padding: 18px 22px 60px; }
+.panel { width: 560px; flex-shrink: 0; background: var(--paper); border-left: 1px solid var(--line); position: sticky; top: 92px; height: calc(100vh - 92px); overflow-y: auto; }
+@media (max-width: 1100px) { .panel { width: 460px; } }
+@media (max-width: 820px) {
+  .panel { position: fixed; inset: 0; width: auto; height: auto; z-index: 50; border-left: 0; }
+  .topbar { flex-wrap: wrap; }
+  .search { order: 3; max-width: none; flex-basis: 100%; }
+  .nav { top: 96px; }
+}
+
+/* ---------------- controls ---------------- */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+select, .input, textarea { border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 7px 10px; }
+textarea { width: 100%; min-height: 70px; resize: vertical; }
+.input { width: 100%; }
+.btn { border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 7px 12px; cursor: pointer; font-weight: 500; }
+.btn:hover { border-color: var(--ink-faint); }
+.btn.primary { background: var(--forest); border-color: var(--forest); color: var(--cream); }
+.btn.primary:hover { background: var(--forest-soft); }
+.btn.danger { color: var(--danger); }
+.btn.small { padding: 3px 8px; font-size: 12px; }
+.btn.link { border: 0; background: transparent; color: var(--sage-ink); padding: 2px 4px; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: var(--paper); padding: 7px 12px; cursor: pointer; }
+.seg button.active { background: var(--forest); color: var(--cream); }
+.muted { color: var(--ink-soft); }
+.faint { color: var(--ink-faint); font-size: 12px; }
+.row-between { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ---------------- pills ---------------- */
+.pills { display: flex; flex-wrap: wrap; gap: 5px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--cream-deep); color: var(--ink-soft); white-space: nowrap; }
+.pill.sage { background: var(--sage); color: var(--sage-ink); }
+.pill.bloom { background: var(--terracotta-soft); color: var(--terracotta); }
+.pill.gold { background: var(--gold-soft); color: var(--gold); }
+.pill.sky { background: var(--sky); color: var(--sky-ink); }
+.pill.danger { background: var(--danger-soft); color: var(--danger); }
+
+/* ---------------- gallery ---------------- */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
+.card { background: var(--paper); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; cursor: pointer; border: 2px solid transparent; display: flex; flex-direction: column; }
+.card:hover { border-color: var(--line); }
+.card.selected { border-color: var(--forest); }
+.card .photo { aspect-ratio: 4 / 3; background: var(--cream-deep); display: flex; align-items: center; justify-content: center; color: var(--ink-faint); overflow: hidden; }
+.card .photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+.plant-name { font-family: var(--serif); font-size: 17px; font-weight: 600; line-height: 1.2; }
+.plant-sub { font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 13px; }
+.more { text-align: center; margin: 18px 0; }
+
+/* ---------------- spreadsheet ---------------- */
+.table-wrap { overflow-x: auto; background: var(--paper); border-radius: var(--radius); box-shadow: var(--shadow); }
+table.sheet { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.sheet th, table.sheet td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+table.sheet th { background: var(--cream-deep); font-weight: 600; position: sticky; top: 0; white-space: nowrap; }
+table.sheet tr.clickable { cursor: pointer; }
+table.sheet tr.clickable:hover td { background: var(--cream); }
+table.sheet tr.selected td { background: var(--sage); }
+table.sheet .name { font-family: var(--serif); font-weight: 600; }
+
+/* ---------------- detail panel ---------------- */
+.panel-head { padding: 16px 18px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--paper); z-index: 2; }
+.panel-head h2 { font-family: var(--serif); font-size: 24px; margin: 0; line-height: 1.15; }
+.panel-actions { display: flex; gap: 6px; }
+.tabs { display: flex; gap: 2px; margin-top: 10px; overflow-x: auto; }
+.tabs button { border: 1px solid transparent; background: transparent; padding: 6px 10px; border-radius: 8px 8px 0 0; cursor: pointer; color: var(--ink-soft); white-space: nowrap; }
+.tabs button.active { border-color: var(--line); border-bottom-color: var(--paper); color: var(--ink); background: var(--paper); font-weight: 600; margin-bottom: -9px; padding-bottom: 14px; }
+.panel-body { padding: 14px 18px 40px; }
+.section { margin-bottom: 20px; }
+.section h3 { font-family: var(--serif); font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+.box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--paper); }
+.box.tinted { background: var(--cream); }
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; font-size: 13px; }
+.kv .k { color: var(--ink-soft); }
+.thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.thumbs img { width: 120px; height: 96px; object-fit: cover; border-radius: 8px; cursor: zoom-in; background: var(--cream-deep); }
+.post-text { white-space: pre-wrap; font-size: 13px; }
+.empty { color: var(--ink-faint); padding: 18px; text-align: center; border: 1px dashed var(--line); border-radius: 10px; }
+
+/* curated form */
+.field { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.field:last-child { border-bottom: 0; }
+.field label.lbl { display: block; font-size: 12px; font-weight: 600; color: var(--ink-soft); margin-bottom: 3px; }
+.field .prov { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+.sugg { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; background: var(--sky); color: var(--sky-ink); border-radius: 6px; padding: 4px 8px; margin-top: 4px; }
+.sugg .src { font-weight: 600; white-space: nowrap; }
+.sugg .val { flex: 1; }
+.checks { display: flex; gap: 12px; flex-wrap: wrap; }
+.dirty { outline: 2px solid var(--gold-soft); }
+.save-bar { position: sticky; bottom: 0; background: var(--paper); border-top: 1px solid var(--line); padding: 10px 0; display: flex; gap: 8px; align-items: center; }
+
+/* duplicates */
+.pair { background: var(--paper); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px; margin-bottom: 14px; }
+.pair-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .pair-sides { grid-template-columns: 1fr; } }
+.side { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; gap: 10px; }
+.side img, .side .ph { width: 84px; height: 70px; object-fit: cover; border-radius: 8px; background: var(--cream-deep); flex-shrink: 0; }
+.reasons { margin: 8px 0; padding-left: 18px; font-size: 13px; color: var(--ink-soft); }
+.snippet { font-size: 12px; color: var(--ink-soft); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* misc */
+.progress { height: 10px; background: var(--cream-deep); border-radius: 6px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--forest); width: 0; transition: width 0.2s; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin: 10px 0; }
+.stat { background: var(--paper); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); }
+.stat .n { font-size: 22px; font-weight: 700; font-family: var(--serif); }
+.stat .l { font-size: 12px; color: var(--ink-soft); }
+.page-title { font-family: var(--serif); font-size: 24px; margin: 0 0 4px; }
+.notice { background: var(--gold-soft); color: var(--gold); padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
+.notice.bad { background: var(--danger-soft); color: var(--danger); }
+.notice.good { background: var(--sage); color: var(--sage-ink); }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--cream); padding: 10px 16px; border-radius: 8px; z-index: 100; max-width: 90vw; box-shadow: var(--shadow); }
+.toast.bad { background: var(--danger); }
+.lightbox { position: fixed; inset: 0; background: rgba(31, 42, 36, 0.88); z-index: 90; display: flex; align-items: center; justify-content: center; cursor: zoom-out; padding: 20px; }
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: 6px; }
+.center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--forest); }
+.login-card { background: var(--paper); border-radius: 16px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: var(--shadow); }
+.login-card h1 { font-family: var(--serif); margin: 10px 0 6px; }
+.gbtn { display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 10px 18px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+.gbtn svg { width: 18px; height: 18px; }
+footer.foot { text-align: center; color: var(--ink-faint); font-size: 11px; padding: 20px 0 30px; }
+.merge-results { border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; max-height: 260px; overflow-y: auto; }
+.merge-results > div { padding: 6px 10px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.merge-results > div:last-child { border-bottom: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } .kv { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="overlay"></div>
+<script>
+"use strict";
+/* ==================================================================
+   RBG PLANT COLLECTION MANAGER
+   Single file, no framework, no libraries. Data lives in Supabase
+   (project jkrsdvjrnsrjowhaobsr); the schema is sql/001 + sql/002 in
+   this repo and is the authority on what a row looks like and who may
+   write it (row-level security).
+
+   Two rules that shape everything below:
+   1. The app NEVER computes name_key. Every row arrives with a key the
+      database generated (public.name_key(), a port of the bot's
+      names.py). A "plant" is all rows whose key resolves, through
+      name_merges, to the same canonical key.
+   2. Sources are read-only here. Tumblr, Plant Highlights and What's in
+      Bloom are edited where they live; the bot re-syncs them. The app
+      only writes decisions (merges), curated records, plantings, and
+      IrisBG imports.
+   ================================================================== */
+
+/* ==================== CONFIG ==================== */
+// The publishable key is designed to be public: on its own it can read
+// nothing, because every table's RLS requires a signed-in staff member.
+const CONFIG = {
+  SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
+  PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
+};
+const APP_VERSION = "1.0.0";
+const APP_UPDATED = "2026-09-12";
+const SESSION_KEY = "rbgpcm_session";
+const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
+const WRITE_BATCH = 500;
+const GALLERY_PAGE = 60;
+const SHEET_PAGE = 200;
+
+// ?demo loads a local, gitignored snapshot (demo-data.json) and keeps all
+// writes in memory. It exists so the UI can be exercised without Google
+// sign-in; it never talks to Supabase.
+const DEMO = new URLSearchParams(location.search).has("demo");
+
+const SOURCE_LABELS = { tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG" };
+const PROVENANCE_LABELS = {
+  tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG",
+  iucn: "IUCN", manual: "typed in", derived: "derived",
+};
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const IUCN = [
+  ["NE", "Not Evaluated"], ["DD", "Data Deficient"], ["LC", "Least Concern"], ["NT", "Near Threatened"],
+  ["VU", "Vulnerable"], ["EN", "Endangered"], ["CR", "Critically Endangered"], ["EW", "Extinct in the Wild"], ["EX", "Extinct"],
+];
+const GPS_METHODS = [
+  ["field_maps_gps", "ArcGIS Field Maps (GPS)"], ["map_placed", "Placed on a map"], ["imported", "Imported"], ["other", "Other"],
+];
+const PLANTING_STATUS = ["alive", "dead", "removed", "unknown"];
+const GAPS = {
+  photo: "No photo", description: "No description", highlight: "No Plant Highlight", wib: "No What's in Bloom data",
+  accession: "No accession", curated: "No curated record", gps: "No GPS on any planting",
+};
+
+/* ==================== STATE ==================== */
+const TABLES = [
+  "source_records", "name_merges", "not_duplicates", "staff", "taxa", "accessions", "plantings",
+  "garden_locations", "list_options", "wib_editions", "wib_appearances", "irisbg_imports",
+];
+// Paging needs a stable, unique sort or rows repeat/vanish between pages.
+const TABLE_ORDER = {
+  source_records: "id", name_merges: "alias_key", not_duplicates: "key_a,key_b", staff: "email", taxa: "id",
+  accessions: "id", plantings: "id", garden_locations: "code", list_options: "list,sort,value",
+  wib_editions: "id", wib_appearances: "edition_id,plant_name", irisbg_imports: "id",
+};
+
+const state = {
+  session: null,          // {access_token, refresh_token, expires_at, email}
+  me: null,               // own staff row, or null when not on the list
+  phase: "boot",          // boot | login | notstaff | loading | ready | error
+  error: null,
+  data: Object.fromEntries(TABLES.map((t) => [t, []])),
+  idx: null,              // derived plant index, rebuilt by buildIndex()
+  dupes: null,            // cached duplicate suggestions
+  view: "browse",
+  browse: { q: "", source: "", genus: "", family: "", curated: "", gap: "", sort: "name", mode: "gallery", limit: GALLERY_PAGE },
+  selectedKey: null,
+  tab: "curated",
+  dupLimit: 25,
+  incompleteGap: "photo",
+  incompleteLimit: 100,
+  importState: null,      // IrisBG import wizard state
+  mergeQuery: "",
+  editingPlanting: null,  // planting id being edited
+  adminTab: "import",
+};
+
+/* ==================== SMALL UTILITIES ==================== */
+function escapeHtml(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const esc = escapeHtml;
+function attr(v) { return escapeHtml(v); }
+function blank(v) { return v == null || (typeof v === "string" && v.trim() === ""); }
+function norm(v) { return blank(v) ? null : String(v).trim(); }
+function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + "s")}`; }
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? String(iso) : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+function fmtDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? String(iso) : d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+function shortEmail(e) { return e ? String(e).split("@")[0] : ""; }
+function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+
+function toast(msg, bad = false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (bad ? " bad" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), bad ? 7000 : 3500);
+}
+
+function openLightbox(src) {
+  document.getElementById("overlay").innerHTML = `<div class="lightbox" data-action="close-lightbox"><img src="${attr(src)}" alt=""></div>`;
+}
+
+/* ==================== SESSION / AUTH ====================
+   Hand-rolled Supabase Auth (GoTrue), same approach as the ABG app.
+   Google sign-in uses the IMPLICIT flow: /auth/v1/authorize redirects to
+   Google, Google back to Supabase, and Supabase back here with the tokens
+   in the URL #hash. Chosen over PKCE because PKCE needs a code verifier
+   stored across the redirect and a second token exchange, and gains
+   nothing for a page that keeps its session in localStorage anyway.
+   ========================================================== */
+function saveSession(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {} }
+function loadStoredSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
+function clearStoredSession() { try { localStorage.removeItem(SESSION_KEY); } catch (e) {} }
+
+function decodeJwt(token) {
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(decodeURIComponent(atob(part).split("").map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")));
+  } catch (e) { return {}; }
+}
+
+// Reads tokens (or an error) that Supabase put in the URL after the
+// Google round trip, then strips them from the address bar so a copied
+// link or a reload never carries a token.
+function consumeAuthRedirect() {
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const query = new URLSearchParams(location.search);
+  const err = hash.get("error_description") || query.get("error_description") || hash.get("error") || query.get("error");
+  const token = hash.get("access_token");
+  if (token || err) {
+    const keep = new URLSearchParams(location.search);
+    ["error", "error_code", "error_description"].forEach((k) => keep.delete(k));
+    const qs = keep.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+  }
+  if (err) return { error: err.replace(/\+/g, " ") };
+  if (!token) return null;
+  const claims = decodeJwt(token);
+  const expiresIn = Number(hash.get("expires_in") || 3600);
+  return {
+    session: {
+      access_token: token,
+      refresh_token: hash.get("refresh_token"),
+      expires_at: Date.now() + expiresIn * 1000,
+      email: String(claims.email || "").toLowerCase(),
+    },
+  };
+}
+
+function signInWithGoogle() {
+  const redirect = location.origin + location.pathname;
+  location.href = `${CONFIG.SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirect)}`;
+}
+
+async function signOut() {
+  if (DEMO) { toast("Demo mode has no session."); return; }
+  const s = state.session;
+  clearStoredSession();
+  state.session = null;
+  state.me = null;
+  state.phase = "login";
+  render();
+  if (s) {
+    // Best effort: revokes the refresh token server-side. The local session
+    // is already gone either way.
+    fetch(`${CONFIG.SUPABASE_URL}/auth/v1/logout`, {
+      method: "POST", headers: { apikey: CONFIG.PUBLISHABLE_KEY, Authorization: `Bearer ${s.access_token}` },
+    }).catch(() => {});
+  }
+}
+
+async function refreshAccessToken(refresh_token) {
+  const res = await fetch(`${CONFIG.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { apikey: CONFIG.PUBLISHABLE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) throw new Error(data.error_description || data.msg || "Session refresh failed");
+  return data;
+}
+
+// Lesson carried over from the ABG app (SESSION-1 there): refreshing only
+// on page load meant anyone who sat on a form past the token's hour lost
+// their edit to "JWT expired". Every request goes through authedFetch,
+// which refreshes when the token is near expiry and retries once if the
+// server still says it expired.
+async function forceRefreshSession() {
+  if (!state.session || !state.session.refresh_token) return false;
+  try {
+    const data = await refreshAccessToken(state.session.refresh_token);
+    state.session = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Date.now() + data.expires_in * 1000,
+      email: String(data.user?.email || state.session.email).toLowerCase(),
+    };
+    saveSession(state.session);
+    return true;
+  } catch (e) {
+    clearStoredSession();
+    state.session = null;
+    state.phase = "login";
+    toast("Your session expired — please sign in again.", true);
+    render();
+    return false;
+  }
+}
+
+async function ensureFreshSession() {
+  if (!state.session) return;
+  if (state.session.expires_at && Date.now() < state.session.expires_at - 5 * 60 * 1000) return;
+  await forceRefreshSession();
+}
+
+async function authedFetch(url, opts = {}) {
+  await ensureFreshSession();
+  const build = () => ({
+    ...opts,
+    headers: {
+      apikey: CONFIG.PUBLISHABLE_KEY,
+      Authorization: `Bearer ${state.session ? state.session.access_token : CONFIG.PUBLISHABLE_KEY}`,
+      ...(opts.headers || {}),
+    },
+  });
+  let res = await fetch(url, build());
+  if (res.status === 401) {
+    const body = await res.clone().text();
+    if (/JWT expired|PGRST303/i.test(body) && await forceRefreshSession()) res = await fetch(url, build());
+  }
+  return res;
+}
+
+/* ==================== DATA ACCESS ====================
+   One small interface, two implementations: PostgREST for real use and
+   an in-memory store for ?demo. Filters are plain objects:
+     { col: value }            equality
+     { col: { in: [...] } }    membership
+     { col: { neq: value } }   not equal
+   ========================================================== */
+function pgValue(v) {
+  // Values inside in.(...) are quoted so commas, dots and parentheses in
+  // plant names can't break the list syntax.
+  return `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+function pgFilterParams(filter) {
+  const params = [];
+  for (const [col, cond] of Object.entries(filter || {})) {
+    if (cond && typeof cond === "object" && "in" in cond) params.push(`${col}=in.(${cond.in.map(pgValue).join(",")})`);
+    else if (cond && typeof cond === "object" && "neq" in cond) params.push(`${col}=neq.${encodeURIComponent(cond.neq)}`);
+    else if (cond === null) params.push(`${col}=is.null`);
+    else params.push(`${col}=eq.${encodeURIComponent(cond)}`);
+  }
+  return params;
+}
+
+async function pgError(res) {
+  const text = await res.text();
+  let msg = text;
+  try {
+    const j = JSON.parse(text);
+    msg = j.message || j.msg || text;
+    if (j.details) msg += ` (${j.details})`;
+    if (j.code === "42501") msg = "You don't have permission to do that. " + msg;
+  } catch (e) {}
+  return new Error(msg || `HTTP ${res.status}`);
+}
+
+const liveDb = {
+  async selectAll(table) {
+    const rows = [];
+    for (let offset = 0; ; offset += PAGE_SIZE) {
+      const url = `${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=*&order=${TABLE_ORDER[table]}&limit=${PAGE_SIZE}&offset=${offset}`;
+      const res = await authedFetch(url);
+      if (!res.ok) throw await pgError(res);
+      const page = await res.json();
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) return rows;
+    }
+  },
+  async select(table, filter) {
+    const params = ["select=*", ...pgFilterParams(filter)];
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${params.join("&")}`);
+    if (!res.ok) throw await pgError(res);
+    return res.json();
+  },
+  // rows: array. onConflict: "col,col" makes it an upsert that only updates
+  // the columns present in the payload (PostgREST merge-duplicates).
+  async insert(table, rows, { onConflict, returning = true } = {}) {
+    if (!rows.length) return [];
+    const params = onConflict ? `?on_conflict=${onConflict}` : "";
+    const prefer = [returning ? "return=representation" : "return=minimal"];
+    if (onConflict) prefer.push("resolution=merge-duplicates");
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Prefer: prefer.join(",") },
+      body: JSON.stringify(rows),
+    });
+    if (!res.ok) throw await pgError(res);
+    return returning ? res.json() : [];
+  },
+  async update(table, filter, patch) {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${pgFilterParams(filter).join("&")}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Prefer: "return=representation" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw await pgError(res);
+    return res.json();
+  },
+  async remove(table, filter) {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${pgFilterParams(filter).join("&")}`, {
+      method: "DELETE", headers: { Prefer: "return=minimal" },
+    });
+    if (!res.ok) throw await pgError(res);
+  },
+};
+
+/* ---------- demo store ----------
+   Emulates just enough of the database for the UI: identity ids, the
+   generated name_key columns, column defaults, upsert, and the two
+   name_merges triggers. demoNameKey is a DEMO-ONLY copy of
+   public.name_key() so imported rows get keys; the real app never runs it. */
+const DEMO_KEY_TABLES = { source_records: "plant_name", accessions: "plant_name", wib_appearances: "plant_name" };
+const DEMO_PK = {
+  source_records: ["source", "source_id"], name_merges: ["alias_key"], not_duplicates: ["key_a", "key_b"], staff: ["email"],
+  taxa: ["id"], accessions: ["id"], plantings: ["id"], garden_locations: ["code"], list_options: ["list", "value"],
+  irisbg_imports: ["id"], wib_editions: ["id"],
+};
+const DEMO_IDENTITY = new Set(["source_records", "taxa", "accessions", "plantings", "irisbg_imports", "wib_editions"]);
+
+function demoNameKey(name) {
+  let n = String(name || "").normalize("NFKC").replace(/[​‌‍﻿]/g, "").trim();
+  n = n.replace(/^(?:×\s*|x\s+(?=[A-Z]))/, "").toLowerCase();
+  n = n.replace(/[‘’‚‛`´′]/g, "'").replace(/[“”„‟″"]/g, "'").replace(/\s*×\s*/g, " x ");
+  n = n.replace(/\bsubsp\b\.?/g, "ssp.").replace(/\bssp\b\.?/g, "ssp.").replace(/\bv(?:ar)?\b\.?(?=\s)/g, "var.");
+  n = n.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")").replace(/\s+/g, " ");
+  return n.replace(/^[ \-–—.,;:]+|[ \-–—.,;:]+$/g, "");
+}
+
+function demoMatch(row, filter) {
+  return Object.entries(filter || {}).every(([col, cond]) => {
+    if (cond && typeof cond === "object" && "in" in cond) return cond.in.map(String).includes(String(row[col]));
+    if (cond && typeof cond === "object" && "neq" in cond) return String(row[col]) !== String(cond.neq);
+    if (cond === null) return row[col] == null;
+    return String(row[col]) === String(cond);
+  });
+}
+
+const demoDb = {
+  store: null,
+  nextId: {},
+  async selectAll(table) { return (this.store[table] || []).map((r) => ({ ...r })); },
+  async select(table, filter) { return (this.store[table] || []).filter((r) => demoMatch(r, filter)).map((r) => ({ ...r })); },
+  newId(table) {
+    if (!this.nextId[table]) this.nextId[table] = (this.store[table] || []).reduce((m, r) => Math.max(m, Number(r.id) || 0), 0) + 1;
+    return this.nextId[table]++;
+  },
+  defaults(table, row) {
+    const me = state.me ? state.me.email : "demo@local";
+    const now = new Date().toISOString();
+    if (table === "name_merges") return { merged_by: me, merged_at: now, ...row };
+    if (table === "not_duplicates") return { marked_by: me, marked_at: now, ...row };
+    if (table === "irisbg_imports") return { imported_by: me, imported_at: now, summary: {}, ...row };
+    if (table === "taxa") return { blooming_season: [], provenance: {}, created_at: now, updated_at: now, ...row };
+    if (table === "accessions") return { in_latest_export: true, created_at: now, updated_at: now, ...row };
+    if (table === "plantings") return { status: "alive", in_latest_export: true, created_at: now, updated_at: now, ...row };
+    if (table === "source_records") return { tags: [], details: {}, synced_at: now, ...row };
+    if (table === "staff") return { is_admin: false, added_at: now, ...row };
+    return row;
+  },
+  // Mirrors name_merges_flatten + name_merges_move_taxon from sql/.
+  mergeTriggers(row) {
+    const merges = this.store.name_merges;
+    const hop = merges.find((m) => m.alias_key === row.canonical_key);
+    if (hop) { row.canonical_key = hop.canonical_key; row.canonical_name = hop.canonical_name; }
+    if (row.canonical_key === row.alias_key) throw new Error(`Merge would point ${row.alias_name} at itself`);
+    const taxa = this.store.taxa;
+    const aliasTaxon = taxa.find((t) => t.name_key === row.alias_key);
+    if (aliasTaxon && taxa.find((t) => t.name_key === row.canonical_key)) {
+      throw new Error(`Both "${row.alias_name}" and "${row.canonical_name}" have curated records. Copy what you need into one and delete the other before merging.`);
+    }
+    merges.forEach((m) => { if (m.canonical_key === row.alias_key) { m.canonical_key = row.canonical_key; m.canonical_name = row.canonical_name; } });
+    if (aliasTaxon) { aliasTaxon.name_key = row.canonical_key; aliasTaxon.display_name = row.canonical_name; }
+  },
+  async insert(table, rows, { onConflict } = {}) {
+    const list = this.store[table] || (this.store[table] = []);
+    const out = [];
+    for (const input of rows) {
+      let row = { ...input };
+      if (DEMO_KEY_TABLES[table]) row.name_key = demoNameKey(row[DEMO_KEY_TABLES[table]]);
+      const keys = onConflict ? onConflict.split(",") : DEMO_PK[table];
+      const existing = keys && list.find((r) => keys.every((k) => r[k] != null && String(r[k]) === String(row[k])));
+      if (existing && onConflict) { Object.assign(existing, row, { updated_at: new Date().toISOString() }); out.push({ ...existing }); continue; }
+      if (existing && !DEMO_IDENTITY.has(table)) throw new Error(`duplicate key value violates unique constraint on ${table}`);
+      row = this.defaults(table, row);
+      if (DEMO_IDENTITY.has(table)) row.id = this.newId(table);
+      if (table === "name_merges") this.mergeTriggers(row);
+      list.push(row);
+      out.push({ ...row });
+    }
+    return out;
+  },
+  async update(table, filter, patch) {
+    const hits = (this.store[table] || []).filter((r) => demoMatch(r, filter));
+    hits.forEach((r) => {
+      Object.assign(r, patch);
+      if (DEMO_KEY_TABLES[table]) r.name_key = demoNameKey(r[DEMO_KEY_TABLES[table]]);
+      if ("updated_at" in r) { r.updated_at = new Date().toISOString(); r.updated_by = state.me?.email; }
+    });
+    return hits.map((r) => ({ ...r }));
+  },
+  async remove(table, filter) {
+    this.store[table] = (this.store[table] || []).filter((r) => !demoMatch(r, filter));
+  },
+};
+
+const db = DEMO ? demoDb : liveDb;
+
+/* ==================== LOADING ==================== */
+async function loadAll() {
+  state.phase = "loading";
+  render();
+  const results = await Promise.all(TABLES.map((t) => db.selectAll(t).then((rows) => [t, rows])));
+  for (const [t, rows] of results) state.data[t] = rows;
+  buildIndex();
+}
+
+async function reloadTables(...tables) {
+  const results = await Promise.all(tables.map((t) => db.selectAll(t).then((rows) => [t, rows])));
+  for (const [t, rows] of results) state.data[t] = rows;
+  buildIndex();
+}
+
+/* ==================== PLANT INDEX ====================
+   Derived, never stored. Rebuilt after every write that could change
+   grouping (merges, imports) — ~5k rows, a few milliseconds.
+   ==================================================== */
+function resolveKey(key) {
+  const m = state.idx && state.idx.mergeMap.get(key);
+  return m ? m.canonical_key : key;
+}
+
+function firstWord(name) {
+  const w = String(name || "").replace(/^\s*(?:×\s*|x\s+(?=[A-Z]))/, "").trim().split(/\s+/)[0] || "";
+  return w.replace(/[^A-Za-z\-]/g, "");
+}
+
+function buildIndex() {
+  const d = state.data;
+  const mergeMap = new Map(d.name_merges.map((m) => [m.alias_key, m]));
+  const idx = { mergeMap, plants: new Map(), editionsById: new Map(d.wib_editions.map((e) => [e.id, e])) };
+  state.idx = idx;
+  const resolve = (k) => (mergeMap.has(k) ? mergeMap.get(k).canonical_key : k);
+
+  const plantFor = (rawKey) => {
+    const key = resolve(rawKey);
+    let p = idx.plants.get(key);
+    if (!p) {
+      p = { key, spellings: new Map(), tumblr: [], website: [], wib: [], irisbg: [], accessions: [], appearances: [], taxon: null };
+      idx.plants.set(key, p);
+    }
+    return p;
+  };
+  const addSpelling = (p, rawKey, name, source) => {
+    const s = p.spellings.get(rawKey) || { key: rawKey, names: new Set(), sources: {} };
+    s.names.add(name);
+    s.sources[source] = (s.sources[source] || 0) + 1;
+    p.spellings.set(rawKey, s);
+  };
+
+  for (const r of d.source_records) {
+    const p = plantFor(r.name_key);
+    p[r.source].push(r);
+    addSpelling(p, r.name_key, r.plant_name, r.source);
+  }
+  const plantingsByAcc = new Map();
+  for (const pl of d.plantings) {
+    if (!plantingsByAcc.has(pl.accession_id)) plantingsByAcc.set(pl.accession_id, []);
+    plantingsByAcc.get(pl.accession_id).push(pl);
+  }
+  for (const a of d.accessions) {
+    const p = plantFor(a.name_key);
+    a._plantings = (plantingsByAcc.get(a.id) || []).sort((x, y) => String(x.item_qualifier).localeCompare(String(y.item_qualifier), undefined, { numeric: true }));
+    p.accessions.push(a);
+    addSpelling(p, a.name_key, a.plant_name, "accession");
+  }
+  for (const ap of d.wib_appearances) {
+    const p = plantFor(ap.name_key);
+    const ed = idx.editionsById.get(ap.edition_id);
+    if (ed) p.appearances.push({ ...ap, edition: ed });
+    addSpelling(p, ap.name_key, ap.plant_name, "wib edition");
+  }
+  // A taxon only exists for keys that already have a plant (the trigger
+  // keeps it on the canonical key), but resolve anyway in case a merge was
+  // made while the taxon row pointed at the alias.
+  for (const t of d.taxa) {
+    const key = resolve(t.name_key);
+    const p = idx.plants.get(key) || plantFor(t.name_key);
+    p.taxon = t;
+  }
+
+  const canonicalNames = new Map([...mergeMap.values()].map((m) => [m.canonical_key, m.canonical_name]));
+  for (const p of idx.plants.values()) finalizePlant(p, canonicalNames);
+  idx.list = [...idx.plants.values()];
+  state.dupes = null;
+}
+
+function finalizePlant(p, canonicalNames) {
+  p.tumblr.sort((a, b) => String(b.posted_at || "").localeCompare(String(a.posted_at || "")));
+  p.appearances.sort((a, b) => (b.edition.year - a.edition.year) || (b.edition.month - a.edition.month));
+  p.accessions.sort((a, b) => String(a.accession_number).localeCompare(String(b.accession_number)));
+  const mergeName = canonicalNames.get(p.key) || null;
+  p.displayName =
+    (p.taxon && p.taxon.display_name) || mergeName ||
+    (p.tumblr[0] && p.tumblr[0].plant_name) || (p.website[0] && p.website[0].plant_name) ||
+    (p.wib[0] && p.wib[0].plant_name) || (p.irisbg[0] && p.irisbg[0].plant_name) ||
+    (p.accessions[0] && p.accessions[0].plant_name) || (p.appearances[0] && p.appearances[0].plant_name) || p.key;
+  p.genus = (p.taxon && p.taxon.genus) || firstWord(p.displayName);
+  p.family = (p.taxon && p.taxon.family) || "";
+  const photoRec = p.tumblr.find((r) => r.photo_url) || p.website.find((r) => r.photo_url);
+  p.photo = photoRec ? photoRec.photo_url : null;
+  const descRec = p.tumblr.find((r) => !blank(r.description)) || p.website.find((r) => !blank(r.description));
+  p.description = descRec ? descRec.description : "";
+  p.hasWib = p.wib.length > 0 || p.appearances.length > 0;
+  p.hasIris = p.irisbg.length > 0 || p.accessions.length > 0;
+  p.sourceCount = (p.tumblr.length ? 1 : 0) + (p.website.length ? 1 : 0) + (p.hasWib ? 1 : 0) + (p.hasIris ? 1 : 0);
+  p.plantingCount = p.accessions.reduce((n, a) => n + a._plantings.length, 0);
+  p.hasGps = p.accessions.some((a) => a._plantings.some((pl) => pl.latitude != null));
+  p.highlightLink = (p.website[0] && p.website[0].link) || (p.tumblr.find((r) => r.details && r.details.website_link) || {}).details?.website_link || null;
+  p.latestPost = p.tumblr[0] ? p.tumblr[0].posted_at : "";
+  p.gaps = new Set();
+  if (!p.photo) p.gaps.add("photo");
+  if (!p.description) p.gaps.add("description");
+  if (!p.highlightLink) p.gaps.add("highlight");
+  if (!p.hasWib) p.gaps.add("wib");
+  if (!p.accessions.length) p.gaps.add("accession");
+  if (!p.taxon) p.gaps.add("curated");
+  if (p.plantingCount && !p.hasGps) p.gaps.add("gps");
+  const accNums = p.accessions.map((a) => a.accession_number).join(" ");
+  p.haystack = [p.displayName, ...[...p.spellings.values()].flatMap((s) => [...s.names]), p.description,
+    p.website[0] ? p.website[0].description : "", accNums, p.taxon ? p.taxon.common_name : ""].join("  ").toLowerCase();
+}
+
+function syncedAt() {
+  let max = "";
+  for (const r of state.data.source_records) if (r.synced_at && r.synced_at > max) max = r.synced_at;
+  return max;
+}
+
+/* ==================== RENDER: SHELL ====================
+   Rendering is string templates + event delegation (data-action on the
+   element, one listener on document). The main column and the detail
+   panel render separately so typing in a curated field never re-renders
+   the gallery underneath it, and vice versa.
+   ======================================================= */
+const LOGO_SVG = `<svg class="brand-mark" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+  <path d="M20 34 C20 24 20 16 20 6"/><path d="M20 34 C14 28 10 20 9 12 C14 16 18 24 20 34"/><path d="M20 34 C26 28 30 20 31 12 C26 16 22 24 20 34"/>
+  <path d="M20 34 C12 31 6 26 3 20 C10 21 16 27 20 34"/><path d="M20 34 C28 31 34 26 37 20 C30 21 24 27 20 34"/></svg>`;
+const SEARCH_SVG = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="6"/><path d="M14 14l4 4"/></svg>`;
+const GOOGLE_SVG = `<svg viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 7l7.1 5.5c4.2-3.9 7.2-9.6 7.2-17z"/><path fill="#FBBC05" d="M10.5 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.6 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.1-5.5c-2 1.4-4.6 2.2-8.8 2.2-6.3 0-11.6-4.1-13.5-9.9l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>`;
+
+function render() {
+  const app = document.getElementById("app");
+  if (state.phase === "boot" || state.phase === "loading") {
+    app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}<h1>RBG Plant Collection Manager</h1><p class="muted">${state.phase === "loading" ? "Loading plant records…" : "Starting…"}</p></div></div>`;
+    return;
+  }
+  if (state.phase === "login") {
+    app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}
+      <h1>RBG Plant Collection Manager</h1>
+      <p class="muted">Ruth Bancroft Garden staff sign in with Google.</p>
+      ${state.error ? `<div class="notice bad">${esc(state.error)}</div>` : ""}
+      <button class="gbtn" data-action="sign-in">${GOOGLE_SVG} Sign in with Google</button>
+      <p class="faint" style="margin-top:18px">v${APP_VERSION}</p></div></div>`;
+    return;
+  }
+  if (state.phase === "notstaff") {
+    app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}
+      <h1>Not on the staff list</h1>
+      <p>Your account (<strong>${esc(state.session?.email)}</strong>) isn't on the staff list — ask an admin to add you.</p>
+      <button class="btn" data-action="sign-out">Sign out</button></div></div>`;
+    return;
+  }
+  if (state.phase === "error") {
+    app.innerHTML = `<div class="center-screen"><div class="login-card"><h1>Couldn't load</h1>
+      <div class="notice bad">${esc(state.error)}</div>
+      <button class="btn primary" data-action="retry">Try again</button> <button class="btn" data-action="sign-out">Sign out</button></div></div>`;
+    return;
+  }
+  app.innerHTML = `${renderTopbar()}${renderNav()}<div class="layout"><main class="main" id="main"></main><aside class="panel" id="panel" ${state.selectedKey ? "" : "hidden"}></aside></div>`;
+  renderMain();
+  renderPanel();
+}
+
+function renderTopbar() {
+  return `<header class="topbar">
+    <div class="brand">${LOGO_SVG}<div><div class="brand-name">RBG Plant Collection Manager</div><div class="brand-sub">Ruth Bancroft Garden${DEMO ? " · DEMO DATA" : ""}</div></div></div>
+    <div class="search">${SEARCH_SVG}<input id="search" type="search" placeholder="Search by name, description, or accession number…" value="${attr(state.browse.q)}" autocomplete="off"></div>
+    <div class="userbox"><span>${esc(state.me?.email || "")}${state.me?.is_admin ? " · admin" : ""}</span>${DEMO ? "" : `<button data-action="sign-out">Sign out</button>`}</div>
+  </header>`;
+}
+
+function renderNav() {
+  const dupes = getDupes().length;
+  const items = [
+    ["browse", "Browse", state.idx.list.length],
+    ["duplicates", "Possible duplicates", dupes],
+    ["incomplete", "Incomplete records", null],
+    ["locations", "Garden locations", null],
+  ];
+  if (state.me?.is_admin) items.push(["admin", "Admin", null]);
+  return `<nav class="nav">${items.map(([v, label, n]) =>
+    `<button class="${state.view === v ? "active" : ""}" data-action="view" data-view="${v}">${label}${n != null ? `<span class="count">${n.toLocaleString()}</span>` : ""}</button>`).join("")}
+    <span class="spacer"></span><span class="synced">Data synced ${esc(fmtDateTime(syncedAt()) || "—")}</span></nav>`;
+}
+
+function renderMain() {
+  const el = document.getElementById("main");
+  if (!el) return;
+  const views = { browse: renderBrowse, duplicates: renderDuplicates, incomplete: renderIncomplete, locations: renderLocations, admin: renderAdmin };
+  el.innerHTML = (views[state.view] || renderBrowse)() + `<footer class="foot">RBG Plant Collection Manager · v${APP_VERSION} (${APP_UPDATED})${DEMO ? " · demo mode: changes are not saved" : ""}</footer>`;
+}
+
+function refreshNavCounts() {
+  const nav = document.querySelector(".nav");
+  if (nav) nav.outerHTML = renderNav();
+}
+
+/* ==================== BROWSE ==================== */
+function filteredPlants() {
+  const b = state.browse;
+  const q = b.q.trim().toLowerCase();
+  let list = state.idx.list.filter((p) => {
+    if (q && !p.haystack.includes(q)) return false;
+    if (b.source === "tumblr" && !p.tumblr.length) return false;
+    if (b.source === "website" && !p.website.length) return false;
+    if (b.source === "wib" && !p.hasWib) return false;
+    if (b.source === "irisbg" && !p.hasIris) return false;
+    if (b.genus && p.genus !== b.genus) return false;
+    if (b.family && p.family !== b.family) return false;
+    if (b.curated === "yes" && !p.taxon) return false;
+    if (b.curated === "no" && p.taxon) return false;
+    if (b.gap && !p.gaps.has(b.gap)) return false;
+    return true;
+  });
+  const byName = (a, c) => a.displayName.localeCompare(c.displayName);
+  if (b.sort === "sources") list.sort((a, c) => (c.sourceCount - a.sourceCount) || byName(a, c));
+  else if (b.sort === "recent") list.sort((a, c) => String(c.latestPost).localeCompare(String(a.latestPost)) || byName(a, c));
+  else list.sort(byName);
+  return list;
+}
+
+function optionList(values, selected, allLabel) {
+  return `<option value="">${esc(allLabel)}</option>` + values.map(([v, label]) => `<option value="${attr(v)}" ${v === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
+}
+
+function renderBrowse() {
+  const b = state.browse;
+  const list = filteredPlants();
+  state.lastList = list.map((p) => p.key);
+  const genusCounts = new Map();
+  const familyCounts = new Map();
+  for (const p of state.idx.list) {
+    if (p.genus) genusCounts.set(p.genus, (genusCounts.get(p.genus) || 0) + 1);
+    if (p.family) familyCounts.set(p.family, (familyCounts.get(p.family) || 0) + 1);
+  }
+  const genera = [...genusCounts].sort((a, c) => a[0].localeCompare(c[0])).map(([g, n]) => [g, `${g} (${n})`]);
+  const families = [...familyCounts].sort((a, c) => a[0].localeCompare(c[0])).map(([f, n]) => [f, `${f} (${n})`]);
+  const shown = list.slice(0, b.limit);
+  return `<div class="toolbar">
+      <select data-filter="source">${optionList([["tumblr", "Has Tumblr"], ["website", "Has Plant Highlight"], ["wib", "Has What's in Bloom"], ["irisbg", "Has IrisBG"]], b.source, "All sources")}</select>
+      <select data-filter="genus">${optionList(genera, b.genus, "All genera")}</select>
+      <select data-filter="family" ${families.length ? "" : "disabled title='Families come from curated records'"}>${optionList(families, b.family, "All families")}</select>
+      <select data-filter="curated">${optionList([["yes", "Curated"], ["no", "Not curated"]], b.curated, "Curated or not")}</select>
+      <select data-filter="gap">${optionList(Object.entries(GAPS), b.gap, "Any completeness")}</select>
+      <button class="btn link" data-action="reset-filters">Reset</button>
+      <span class="spacer" style="flex:1"></span>
+      <div class="seg"><button class="${b.mode === "gallery" ? "active" : ""}" data-action="mode" data-mode="gallery">Gallery</button><button class="${b.mode === "sheet" ? "active" : ""}" data-action="mode" data-mode="sheet">Spreadsheet</button></div>
+    </div>
+    <div class="row-between" style="margin-bottom:10px">
+      <span class="muted">Showing ${list.length.toLocaleString()} plant${list.length === 1 ? "" : "s"}</span>
+      <label class="muted">Sort by <select data-filter="sort">${[["name", "Name (A–Z)"], ["sources", "Most sources"], ["recent", "Most recent post"]].map(([v, l]) => `<option value="${v}" ${b.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    </div>
+    ${list.length === 0 ? `<div class="empty">No plants match these filters.</div>` : b.mode === "gallery" ? renderGallery(shown) : renderSheet(shown)}
+    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+}
+
+function plantPills(p) {
+  const pills = [`<span class="pill sage">${plural(p.sourceCount, "source")}</span>`];
+  if (p.appearances.length) pills.push(`<span class="pill bloom">Blooms</span>`);
+  if (p.accessions.length) pills.push(`<span class="pill sky">${plural(p.accessions.length, "accession")}</span>`);
+  if (p.taxon) pills.push(`<span class="pill sage">Curated</span>`);
+  if (!p.photo) pills.push(`<span class="pill gold">No photo</span>`);
+  if (!p.description) pills.push(`<span class="pill gold">No description</span>`);
+  return pills.join("");
+}
+
+function renderGallery(list) {
+  return `<div class="grid">${list.map((p) => `
+    <div class="card ${state.selectedKey === p.key ? "selected" : ""}" data-action="select" data-key="${attr(p.key)}">
+      <div class="photo">${p.photo ? `<img loading="lazy" src="${attr(p.photo)}" alt="">` : "No photo"}</div>
+      <div class="body">
+        <div class="plant-name">${esc(p.displayName)}</div>
+        <div class="plant-sub">${esc([p.taxon?.common_name, p.family || p.genus].filter(Boolean).join(" · "))}</div>
+        <div class="pills">${plantPills(p)}</div>
+      </div>
+    </div>`).join("")}</div>`;
+}
+
+function yn(v) { return v ? "Y" : "—"; }
+
+function renderSheet(list) {
+  return `<div class="table-wrap"><table class="sheet"><thead><tr>
+    <th>Name</th><th>Family</th><th>Genus</th><th>Sources</th><th>Tumblr</th><th>Highlight</th><th>WIB</th><th>Accessions</th><th>Curated</th><th>Photo</th></tr></thead><tbody>
+    ${list.map((p) => `<tr class="clickable ${state.selectedKey === p.key ? "selected" : ""}" data-action="select" data-key="${attr(p.key)}">
+      <td class="name">${esc(p.displayName)}</td><td>${esc(p.family)}</td><td>${esc(p.genus)}</td><td>${p.sourceCount}</td>
+      <td>${p.tumblr.length || "—"}</td><td>${yn(p.highlightLink)}</td><td>${p.appearances.length || (p.wib.length ? "Y" : "—")}</td>
+      <td>${p.accessions.length || "—"}</td><td>${yn(p.taxon)}</td><td>${yn(p.photo)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+/* ==================== DETAIL PANEL ==================== */
+function selectedPlant() { return state.selectedKey ? state.idx.plants.get(resolveKey(state.selectedKey)) : null; }
+
+function renderPanel() {
+  const panel = document.getElementById("panel");
+  if (!panel) return;
+  const p = selectedPlant();
+  if (!p) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const tabs = [
+    ["curated", "Curated"], ["tumblr", `Tumblr${p.tumblr.length ? ` (${p.tumblr.length})` : ""}`],
+    ["highlight", "Plant Highlight"], ["wib", "What's in Bloom"], ["irisbg", `IrisBG${p.irisbg.length ? ` (${p.irisbg.length})` : ""}`],
+  ];
+  const bodies = { curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab };
+  panel.innerHTML = `<div class="panel-head">
+      <div class="row-between" style="align-items:flex-start">
+        <div><h2>${esc(p.displayName)}</h2>
+          <div class="plant-sub">${esc([p.taxon?.common_name, p.family, p.genus].filter(Boolean).join(" · "))}</div></div>
+        <div class="panel-actions"><button class="btn small" data-action="next-plant">Next plant →</button><button class="btn small" data-action="close-panel" aria-label="Close">✕</button></div>
+      </div>
+      <div class="pills" style="margin-top:6px">${plantPills(p)}</div>
+      <div class="tabs">${tabs.map(([t, l]) => `<button class="${state.tab === t ? "active" : ""}" data-action="tab" data-tab="${t}">${esc(l)}</button>`).join("")}</div>
+    </div>
+    <div class="panel-body">${(bodies[state.tab] || renderCuratedTab)(p)}</div>`;
+}
+
+function thumbs(urls) {
+  const list = urls.filter(Boolean);
+  if (!list.length) return "";
+  return `<div class="thumbs">${list.map((u) => `<img loading="lazy" src="${attr(u)}" alt="" data-action="lightbox" data-src="${attr(u)}">`).join("")}</div>`;
+}
+
+function renderTumblrTab(p) {
+  if (!p.tumblr.length) return `<div class="empty">No Tumblr posts for this plant.</div>`;
+  return p.tumblr.map((r) => `<div class="box">
+      <div class="row-between"><strong class="plant-name" style="font-size:15px">${esc(r.plant_name)}</strong><span class="faint">${esc(fmtDate(r.posted_at))}</span></div>
+      ${thumbs([r.photo_url, r.detail_photo_url])}
+      <div class="post-text">${esc(r.description || "(no text)")}</div>
+      ${r.tags && r.tags.length ? `<div class="pills" style="margin-top:6px">${r.tags.map((t) => `<span class="pill">#${esc(t)}</span>`).join("")}</div>` : ""}
+      <div style="margin-top:6px"><a href="${attr(r.link)}" target="_blank" rel="noopener">Open on Tumblr ↗</a>
+      ${r.details && r.details.website_link ? ` · <a href="${attr(r.details.website_link)}" target="_blank" rel="noopener">Matching Plant Highlight ↗</a>` : ""}</div>
+    </div>`).join("");
+}
+
+function renderHighlightTab(p) {
+  if (!p.website.length) {
+    return p.highlightLink
+      ? `<div class="box">No Plant Highlight record was scraped under this name, but a Tumblr post links to one: <a href="${attr(p.highlightLink)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>`
+      : `<div class="empty">No Plant Highlight for this plant.</div>`;
+  }
+  return p.website.map((r) => `<div class="box">
+      <div class="row-between"><strong class="plant-name" style="font-size:15px">${esc(r.plant_name)}</strong>
+        <span class="faint">${esc([r.details?.author, r.details?.date_label].filter(Boolean).join(" · "))}</span></div>
+      ${thumbs([r.photo_url, r.detail_photo_url])}
+      <div class="post-text">${esc(r.description || "(no text)")}</div>
+      <div style="margin-top:6px"><a href="${attr(r.link)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>
+    </div>`).join("");
+}
+
+function editionLabel(e) { return `${MONTH_NAMES[e.month - 1]} ${e.year}`; }
+
+function editionsList(p) {
+  if (!p.appearances.length) return `<div class="faint">Not found in any parsed What's in Bloom PDF.</div>`;
+  return `<table class="sheet"><thead><tr><th>Edition</th><th>Listed as</th><th>PDF</th></tr></thead><tbody>
+    ${p.appearances.map((a) => `<tr><td>${esc(editionLabel(a.edition))}</td><td>${esc(a.plant_name)}</td>
+      <td><a href="${attr(a.edition.pdf_url)}" target="_blank" rel="noopener">${esc(decodeURIComponent(a.edition.pdf_url.split("/").pop()))} ↗</a></td></tr>`).join("")}
+    </tbody></table>`;
+}
+
+function renderWibTab(p) {
+  const cards = p.wib.map((r) => {
+    const d = r.details || {};
+    return `<div class="box tinted"><strong class="plant-name" style="font-size:15px">${esc(r.plant_name)}</strong>
+      <div class="kv" style="margin-top:6px">
+        <div class="k">Native to</div><div>${esc(d.native_to || "—")}</div>
+        <div class="k">Form &amp; size</div><div>${esc(d.form_size || "—")}</div>
+        <div class="k">Sun / shade</div><div>${esc(d.sun_shade || "—")}</div>
+        <div class="k">Hardy to</div><div>${esc(d.hardy_to || "—")}</div>
+        <div class="k">Bloom history</div><div>${esc(d.bloom_history || "—")}</div>
+      </div></div>`;
+  }).join("");
+  return `<div class="section"><h3>Fact card</h3>${cards || `<div class="empty">No What's in Bloom fact card for this plant.</div>`}</div>
+    <div class="section"><h3>Editions (${p.appearances.length})</h3>${editionsList(p)}</div>`;
+}
+
+function renderIrisTab(p) {
+  if (!p.irisbg.length) {
+    return state.data.irisbg_imports.length
+      ? `<div class="empty">This plant isn't in the latest IrisBG export.</div>`
+      : `<div class="empty">No IrisBG export loaded yet.</div>`;
+  }
+  return p.irisbg.map((r) => `<div class="box"><div class="row-between"><strong>${esc(r.source_id)}</strong><span class="faint">synced ${esc(fmtDate(r.synced_at))}</span></div>
+      <div class="kv" style="margin-top:6px">${Object.entries(r.details || {}).map(([k, v]) => `<div class="k">${esc(k)}</div><div>${esc(v == null || v === "" ? "—" : v)}</div>`).join("")}</div></div>`).join("");
+}
+
+/* ---------- names & merging (top of Curated tab) ----------
+   The search results live in their own container and are the only thing
+   re-rendered while typing, so unsaved curated edits below survive. */
+function renderNamesSection(p) {
+  const spellings = [...p.spellings.values()].sort((a, b) => (a.key === p.key ? -1 : b.key === p.key ? 1 : a.key.localeCompare(b.key)));
+  return `<div class="section"><h3>Names merged into this plant</h3>
+    ${spellings.map((s) => {
+      const merge = state.idx.mergeMap.get(s.key);
+      const src = Object.entries(s.sources).map(([k, n]) => `${n} ${SOURCE_LABELS[k] || k}`).join(", ");
+      return `<div class="row-between box" style="padding:6px 10px">
+        <div><strong>${esc([...s.names][0])}</strong>${s.names.size > 1 ? ` <span class="faint">(${s.names.size} spellings)</span>` : ""}<div class="faint">${esc(src)}${merge ? ` · merged by ${esc(shortEmail(merge.merged_by))} ${esc(fmtDate(merge.merged_at))}` : s.key === p.key ? " · main name" : ""}</div></div>
+        ${merge ? `<button class="btn small" data-action="unmerge" data-alias="${attr(s.key)}">Unmerge</button>` : ""}
+      </div>`;
+    }).join("")}
+    <label class="lbl faint" style="display:block;margin-top:8px" for="merge-search">Merge with another plant</label>
+    <input class="input" id="merge-search" placeholder="Search for the other plant…" value="${attr(state.mergeQuery)}" autocomplete="off">
+    <div id="merge-results">${renderMergeResults(p)}</div>
+  </div>`;
+}
+
+function renderMergeResults(p) {
+  const q = state.mergeQuery.trim().toLowerCase();
+  if (q.length < 2) return "";
+  const starts = (o) => (o.displayName.toLowerCase().startsWith(q) ? 0 : 1);
+  const results = state.idx.list.filter((o) => o.key !== p.key && o.haystack.includes(q))
+    .sort((a, b) => starts(a) - starts(b) || a.displayName.localeCompare(b.displayName)).slice(0, 8);
+  if (!results.length) return `<div class="faint">No other plant matches.</div>`;
+  const short = (n) => (n.length > 22 ? n.slice(0, 20) + "…" : n);
+  return `<div class="merge-results">${results.map((o) => `<div>
+      <div><strong>${esc(o.displayName)}</strong><div class="faint">${esc(sourceSummary(o))}</div></div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+        <button class="btn small" data-action="merge" data-keep="${attr(p.key)}" data-alias="${attr(o.key)}">Keep “${esc(short(p.displayName))}”</button>
+        <button class="btn small" data-action="merge" data-keep="${attr(o.key)}" data-alias="${attr(p.key)}">Keep “${esc(short(o.displayName))}”</button>
+      </div></div>`).join("")}</div>`;
+}
+
+/* ==================== CURATED RECORD ====================
+   One taxa row per plant (its canonical name_key). Every field shows the
+   values the sources suggest next to it with a "Use" button, and saving
+   records WHERE each changed value came from in taxa.provenance:
+     { field: { source, source_record_id, by, at } }
+   A value put in with "Use" keeps that source only if it is saved
+   unchanged; editing it afterwards makes it "typed in".
+   ======================================================== */
+const CURATED_FIELDS = [
+  { f: "display_name", label: "Display name", type: "text" },
+  { f: "common_name", label: "Common name", type: "text" },
+  { f: "family", label: "Family", type: "text" },
+  { f: "genus", label: "Genus", type: "text", half: true },
+  { f: "species", label: "Species", type: "text", half: true },
+  { f: "infra_rank", label: "Rank below species", type: "select", options: [["ssp.", "ssp. (subspecies)"], ["var.", "var. (variety)"], ["f.", "f. (form)"]], half: true },
+  { f: "infra_epithet", label: "Name below species", type: "text", half: true },
+  { f: "cultivar", label: "Cultivar", type: "text", half: true },
+  { f: "hybrid_formula", label: "Hybrid formula", type: "text", half: true },
+  { f: "plant_type", label: "Plant type", type: "list", list: "plant_type" },
+  { f: "native_to", label: "Origin / native to", type: "text" },
+  { f: "native_to_ca", label: "Native to California", type: "tri" },
+  { f: "form_size", label: "Form & size", type: "text" },
+  { f: "light_needs", label: "Light needs", type: "list", list: "light_needs" },
+  { f: "hardiness", label: "Hardiness", type: "text" },
+  { f: "water_needs", label: "Water needs", type: "list", list: "water_needs" },
+  { f: "blooming_season", label: "Blooming season", type: "multi", list: "blooming_season" },
+  { f: "conservation_status", label: "Conservation status (IUCN Red List)", type: "select", options: IUCN.map(([c, l]) => [c, `${l} (${c})`]) },
+  { f: "conservation_assessed_year", label: "Year assessed", type: "number", half: true },
+  { f: "conservation_url", label: "Red List link", type: "text", half: true },
+  { f: "notes", label: "Notes", type: "textarea" },
+];
+
+function listValues(list) {
+  return state.data.list_options.filter((o) => o.list === list).sort((a, b) => a.sort - b.sort || a.value.localeCompare(b.value)).map((o) => o.value);
+}
+
+// Splits a botanical name into parts. Deliberately simple and only ever a
+// SUGGESTION: a person accepts each part with "Use".
+function parseNameParts(name) {
+  const out = {};
+  let s = String(name || "").trim();
+  const cv = s.match(/[‘'"“]([^’'"”]+)[’'"”]/);
+  if (cv) out.cultivar = cv[1].trim();
+  const bare = s.replace(/[‘'"“][^’'"”]*[’'"”]/g, " ").replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+  if (/\s[x×]\s/.test(bare)) out.hybrid_formula = bare.replace(/\s[x×]\s/g, " × ");
+  const tokens = bare.replace(/^(?:×\s*|x\s+(?=[A-Z]))/, "").split(" ");
+  if (tokens[0] && /^[A-Za-z][a-z\-]+$/.test(tokens[0])) out.genus = tokens[0][0].toUpperCase() + tokens[0].slice(1);
+  if (tokens[1] && /^[a-z][a-z\-]{2,}$/.test(tokens[1]) && !["hybrid", "species", "cultivar", "form"].includes(tokens[1])) out.species = tokens[1];
+  const infra = bare.match(/(?:^|\s)(subsp\.|ssp\.|var\.|v\.|f\.)\s+([a-z][a-z\-]+)/);
+  if (infra) {
+    out.infra_rank = { "subsp.": "ssp.", "ssp.": "ssp.", "var.": "var.", "v.": "var.", "f.": "f." }[infra[1]];
+    out.infra_epithet = infra[2];
+  }
+  return out;
+}
+
+const SEASON_BY_MONTH = { 12: "Winter", 1: "Winter", 2: "Winter", 3: "Spring", 4: "Spring", 5: "Spring", 6: "Summer", 7: "Summer", 8: "Summer", 9: "Fall", 10: "Fall", 11: "Fall" };
+
+function mentionsCalifornia(text) {
+  // "Baja California" is Mexico, so it doesn't count.
+  const t = String(text || "").replace(/baja california(\s+sur)?/gi, "");
+  return /california|\bCA\b/.test(t);
+}
+
+function curatedSuggestions(p) {
+  const sugg = {};
+  const add = (field, value, source, recordId, label) => {
+    if (blank(value) && typeof value !== "boolean" && !Array.isArray(value)) return;
+    const list = sugg[field] || (sugg[field] = []);
+    const key = JSON.stringify(value);
+    if (list.some((s) => JSON.stringify(s.value) === key)) return;
+    list.push({ value, source, recordId: recordId || null, label });
+  };
+  const names = [[p.displayName, "derived", null]];
+  p.irisbg.forEach((r) => names.push([r.plant_name, "irisbg", r.id]));
+  p.accessions.forEach((a) => names.push([a.plant_name, "irisbg", null]));
+  for (const [n, src, id] of names) {
+    for (const [field, v] of Object.entries(parseNameParts(n))) add(field, v, src, id);
+  }
+  for (const r of p.wib) {
+    const d = r.details || {};
+    add("native_to", d.native_to, "wib", r.id);
+    add("form_size", d.form_size, "wib", r.id);
+    add("hardiness", d.hardy_to, "wib", r.id);
+    if (!blank(d.sun_shade)) {
+      const match = listValues("light_needs").find((v) => v.toLowerCase() === String(d.sun_shade).trim().toLowerCase());
+      if (match) add("light_needs", match, "wib", r.id);
+      else (sugg.light_needs || (sugg.light_needs = [])).push({ raw: d.sun_shade, source: "wib" });
+    }
+    if (!blank(d.native_to)) add("native_to_ca", mentionsCalifornia(d.native_to), "derived", null, `from “${d.native_to}”`);
+  }
+  if (p.appearances.length) {
+    const allowed = listValues("blooming_season");
+    const seasons = [...new Set(p.appearances.map((a) => SEASON_BY_MONTH[a.edition.month]))].filter((s) => allowed.includes(s));
+    const months = [...new Set(p.appearances.map((a) => a.edition.month))].sort((a, b) => a - b).map((m) => MONTH_NAMES[m - 1].slice(0, 3));
+    if (seasons.length) add("blooming_season", allowed.filter((s) => seasons.includes(s)), "derived", null, `appeared in ${months.join(", ")}`);
+  }
+  return sugg;
+}
+
+function displayValue(field, v) {
+  if (v == null || (Array.isArray(v) && !v.length) || v === "") return "—";
+  if (field.type === "tri") return v ? "Yes" : "No";
+  if (Array.isArray(v)) return v.join(", ");
+  return String(v);
+}
+
+function renderFieldInput(field, value) {
+  const id = `cf-${field.f}`;
+  const common = `id="${id}" data-field="${field.f}"`;
+  if (field.type === "textarea") return `<textarea ${common}>${esc(value || "")}</textarea>`;
+  if (field.type === "select" || field.type === "list") {
+    const opts = field.type === "list" ? listValues(field.list).map((v) => [v, v]) : field.options;
+    const extra = value && !opts.some(([v]) => v === value) ? [[value, `${value} (not in list)`]] : [];
+    return `<select class="input" ${common}><option value="">—</option>${[...opts, ...extra].map(([v, l]) => `<option value="${attr(v)}" ${v === value ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  }
+  if (field.type === "tri") {
+    const cur = value === true ? "true" : value === false ? "false" : "";
+    return `<select class="input" ${common}><option value="" ${cur === "" ? "selected" : ""}>Unknown</option><option value="true" ${cur === "true" ? "selected" : ""}>Yes</option><option value="false" ${cur === "false" ? "selected" : ""}>No</option></select>`;
+  }
+  if (field.type === "multi") {
+    const cur = Array.isArray(value) ? value : [];
+    return `<div class="checks" ${common}>${listValues(field.list).map((v) => `<label><input type="checkbox" data-multi="${field.f}" value="${attr(v)}" ${cur.includes(v) ? "checked" : ""}> ${esc(v)}</label>`).join("")}</div>`;
+  }
+  return `<input class="input" type="${field.type === "number" ? "number" : "text"}" ${common} value="${attr(value == null ? "" : value)}">`;
+}
+
+function readFieldValue(field) {
+  if (field.type === "multi") {
+    const order = listValues(field.list);
+    return [...document.querySelectorAll(`input[data-multi="${field.f}"]:checked`)].map((c) => c.value).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }
+  const el = document.getElementById(`cf-${field.f}`);
+  if (!el) return undefined;
+  if (field.type === "tri") return el.value === "" ? null : el.value === "true";
+  if (field.type === "number") return el.value === "" ? null : Number.parseInt(el.value, 10);
+  return norm(el.value);
+}
+
+function provenanceLine(prov) {
+  if (!prov) return "";
+  return `from ${esc(PROVENANCE_LABELS[prov.source] || prov.source)}${prov.by ? ` · ${esc(shortEmail(prov.by))}` : ""}${prov.at ? ` · ${esc(fmtDate(prov.at))}` : ""}`;
+}
+
+function renderCuratedTab(p) {
+  const t = p.taxon || {};
+  const sugg = curatedSuggestions(p);
+  const provenance = t.provenance || {};
+  const fieldHtml = (field) => {
+    const value = field.f === "display_name" ? (t.display_name || p.displayName) : t[field.f];
+    const suggestions = (sugg[field.f] || []).filter((s) => s.raw != null || JSON.stringify(s.value) !== JSON.stringify(value == null ? null : value));
+    return `<div class="field">
+      <label class="lbl" for="cf-${field.f}">${esc(field.label)}</label>
+      ${renderFieldInput(field, value)}
+      ${suggestions.map((s) => s.raw != null
+        ? `<div class="sugg"><span class="src">${esc(SOURCE_LABELS[s.source])}:</span><span class="val">“${esc(s.raw)}” — not a list value; pick the closest</span></div>`
+        : `<div class="sugg"><span class="src">${esc(PROVENANCE_LABELS[s.source])}:</span><span class="val">${esc(displayValue(field, s.value))}${s.label ? ` <span class="faint">(${esc(s.label)})</span>` : ""}</span>
+            <button class="btn small" data-action="use-sugg" data-field="${field.f}" data-value="${attr(JSON.stringify(s.value))}" data-source="${attr(s.source)}" data-record="${attr(s.recordId || "")}">Use</button></div>`).join("")}
+      ${field.f === "conservation_status" ? `<div class="faint" style="margin-top:3px"><a href="https://www.iucnredlist.org/search?query=${encodeURIComponent([t.genus, t.species].filter(Boolean).join(" ") || p.displayName)}&searchType=species" target="_blank" rel="noopener">Look up on the IUCN Red List ↗</a></div>` : ""}
+      <div class="prov" id="prov-${field.f}">${provenanceLine(provenance[field.f])}</div>
+    </div>`;
+  };
+  // Half-width fields pair up two per row.
+  const rows = [];
+  for (let i = 0; i < CURATED_FIELDS.length; i++) {
+    const f = CURATED_FIELDS[i];
+    if (f.half && CURATED_FIELDS[i + 1] && CURATED_FIELDS[i + 1].half) { rows.push(`<div class="grid2">${fieldHtml(f)}${fieldHtml(CURATED_FIELDS[i + 1])}</div>`); i++; }
+    else rows.push(fieldHtml(f));
+  }
+  return `${renderNamesSection(p)}
+    <div class="section"><div class="row-between"><h3>Curated record</h3>
+      <span class="faint">${p.taxon ? `Last edited ${esc(fmtDate(t.updated_at))}${t.updated_by ? ` by ${esc(shortEmail(t.updated_by))}` : ""}` : "Not curated yet — saving creates the record"}</span></div>
+      <form id="curated-form" data-key="${attr(p.key)}" autocomplete="off">${rows.join("")}
+        <div class="save-bar"><button type="submit" class="btn primary">${p.taxon ? "Save changes" : "Create curated record"}</button>
+          <span class="faint" id="curated-status"></span><span style="flex:1"></span>
+          ${p.taxon && state.me?.is_admin ? `<button type="button" class="btn small danger" data-action="delete-taxon">Delete curated record</button>` : ""}</div>
+      </form></div>
+    ${renderAccessionsSection(p)}
+    <div class="section"><h3>Bloom history (${p.appearances.length})</h3>${editionsList(p)}</div>`;
+}
+
+function useSuggestion(btn) {
+  const field = CURATED_FIELDS.find((f) => f.f === btn.dataset.field);
+  const value = JSON.parse(btn.dataset.value);
+  if (field.type === "multi") {
+    document.querySelectorAll(`input[data-multi="${field.f}"]`).forEach((c) => { c.checked = value.includes(c.value); });
+  } else {
+    const el = document.getElementById(`cf-${field.f}`);
+    el.value = field.type === "tri" ? String(value) : value;
+  }
+  const holder = document.getElementById(`cf-${field.f}`);
+  // Remember the source; saveCurated honours it only if the value is still
+  // exactly what was suggested at save time.
+  holder.dataset.provSource = btn.dataset.source;
+  holder.dataset.provRecord = btn.dataset.record;
+  holder.dataset.provValue = JSON.stringify(readFieldValue(field));
+  holder.classList.add("dirty");
+  const prov = document.getElementById(`prov-${field.f}`);
+  if (prov) prov.textContent = `will save as from ${PROVENANCE_LABELS[btn.dataset.source] || btn.dataset.source}`;
+}
+
+async function saveCurated(form) {
+  const p = state.idx.plants.get(form.dataset.key);
+  if (!p) return;
+  const t = p.taxon;
+  const patch = {};
+  const provenance = { ...(t ? t.provenance || {} : {}) };
+  const now = new Date().toISOString();
+  for (const field of CURATED_FIELDS) {
+    const value = readFieldValue(field);
+    const current = t ? t[field.f] : field.f === "display_name" ? null : field.type === "multi" ? [] : null;
+    if (JSON.stringify(value) === JSON.stringify(current == null ? (field.type === "multi" ? [] : null) : current)) continue;
+    if (field.f === "conservation_assessed_year" && value != null && (value < 1960 || value > 2100)) { toast("Year assessed must be between 1960 and 2100.", true); return; }
+    patch[field.f] = field.type === "multi" ? (value || []) : value;
+    const holder = document.getElementById(`cf-${field.f}`);
+    const fromSugg = holder && holder.dataset.provSource && holder.dataset.provValue === JSON.stringify(value);
+    provenance[field.f] = {
+      source: fromSugg ? holder.dataset.provSource : "manual",
+      source_record_id: fromSugg && holder.dataset.provRecord ? Number(holder.dataset.provRecord) : null,
+      by: state.me.email, at: now,
+    };
+  }
+  const status = document.getElementById("curated-status");
+  if (!Object.keys(patch).length && t) { if (status) status.textContent = "No changes to save."; return; }
+  if (!patch.display_name && !t) patch.display_name = p.displayName;
+  if ("display_name" in patch && blank(patch.display_name)) { toast("Display name can't be empty.", true); return; }
+  if (status) status.textContent = "Saving…";
+  try {
+    if (t) await db.update("taxa", { id: t.id }, { ...patch, provenance });
+    else await db.insert("taxa", [{ name_key: p.key, ...patch, provenance }]);
+    await reloadTables("taxa");
+    toast(t ? "Curated record saved." : "Curated record created.");
+    renderPanel();
+    renderMain();
+  } catch (e) {
+    if (status) status.textContent = "";
+    toast(`Couldn't save: ${e.message}`, true);
+  }
+}
+
+async function deleteTaxon() {
+  const p = selectedPlant();
+  if (!p || !p.taxon) return;
+  if (!confirmAction(`Delete the curated record for “${p.displayName}”? The source records are not affected.`)) return;
+  try {
+    await db.remove("taxa", { id: p.taxon.id });
+    await reloadTables("taxa");
+    toast("Curated record deleted.");
+    renderPanel(); renderMain();
+  } catch (e) { toast(`Couldn't delete: ${e.message}`, true); }
+}
+
+// window.confirm is fine for a staff tool; kept behind one function so it
+// can be swapped for an in-page dialog without touching callers.
+function confirmAction(msg) { return window.confirm(msg); }
+
+/* ---------- accessions & plantings ---------- */
+function locationName(code) {
+  const g = code && state.data.garden_locations.find((l) => l.code === code);
+  return g && g.name ? g.name : "";
+}
+
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderAccessionsSection(p) {
+  if (!p.accessions.length) {
+    return `<div class="section"><h3>Accessions</h3><div class="empty">${state.data.irisbg_imports.length ? "No IrisBG accession under this name." : "No IrisBG export loaded yet."}</div></div>`;
+  }
+  return `<div class="section"><h3>Accessions (${p.accessions.length}) · plantings (${p.plantingCount})</h3>
+    ${p.accessions.map((a) => `<div class="box">
+      <div class="row-between"><div><strong>${esc(a.accession_number)}</strong> <span class="plant-sub">${esc(a.plant_name)}</span></div>
+        ${a.in_latest_export ? "" : `<span class="pill gold">Not in latest IrisBG export</span>`}</div>
+      <div class="kv" style="margin:6px 0">
+        <div class="k">Source</div><div>${esc([a.contact_code, a.origin_name].filter(Boolean).join(" — ") || "—")}</div>
+        <div class="k">Comment</div><div>${esc(a.comment || "—")}</div>
+        <div class="k">IrisBG AccNoCons</div><div>${esc(a.irisbg_acc_no_cons || "—")}</div>
+      </div>
+      ${a._plantings.length ? `<div class="table-wrap" style="box-shadow:none;border:1px solid var(--line)"><table class="sheet"><thead><tr><th>Item</th><th>Location</th><th>Position</th><th>Count</th><th>Status</th><th>GPS</th><th></th></tr></thead><tbody>
+        ${a._plantings.map((pl) => renderPlantingRow(a, pl)).join("")}</tbody></table></div>` : `<div class="faint">No plantings.</div>`}
+    </div>`).join("")}</div>`;
+}
+
+function renderPlantingRow(a, pl) {
+  const loc = [pl.bed, pl.sub_location].filter(Boolean).map((c) => { const n = locationName(c); return n ? `${c} (${n})` : c; }).join(" › ");
+  const gps = pl.latitude != null
+    ? `<a href="https://www.google.com/maps?q=${pl.latitude},${pl.longitude}" target="_blank" rel="noopener">${Number(pl.latitude).toFixed(5)}, ${Number(pl.longitude).toFixed(5)} ↗</a>`
+    : "—";
+  const row = `<tr><td>${esc(pl.item_qualifier)}${pl.in_latest_export ? "" : ` <span class="pill gold" title="Not in latest IrisBG export">!</span>`}</td>
+    <td>${esc(loc || "—")}</td><td>${esc(pl.location_ref || "—")}</td><td>${esc(pl.specimen_count || "—")}</td>
+    <td>${esc(pl.status)}</td><td>${gps}</td>
+    <td><button class="btn small" data-action="edit-planting" data-id="${pl.id}">${state.editingPlanting === pl.id ? "Close" : "Edit"}</button></td></tr>`;
+  if (state.editingPlanting !== pl.id) return row;
+  return row + `<tr><td colspan="7"><form id="planting-form" data-id="${pl.id}" autocomplete="off">
+      <div class="grid2">
+        <div class="field"><label class="lbl">Status</label><select class="input" name="status">${PLANTING_STATUS.map((s) => `<option ${s === pl.status ? "selected" : ""}>${s}</option>`).join("")}</select></div>
+        <div class="field"><label class="lbl">ArcGIS GlobalID</label><input class="input" name="arcgis_global_id" value="${attr(pl.arcgis_global_id || "")}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
+        <div class="field"><label class="lbl">Latitude (decimal degrees)</label><input class="input" name="latitude" inputmode="decimal" value="${attr(pl.latitude ?? "")}" placeholder="37.9…"></div>
+        <div class="field"><label class="lbl">Longitude (decimal degrees)</label><input class="input" name="longitude" inputmode="decimal" value="${attr(pl.longitude ?? "")}" placeholder="-122.0…"></div>
+        <div class="field"><label class="lbl">Accuracy (meters)</label><input class="input" name="gps_accuracy_m" inputmode="decimal" value="${attr(pl.gps_accuracy_m ?? "")}"></div>
+        <div class="field"><label class="lbl">How captured</label><select class="input" name="gps_method"><option value="">—</option>${GPS_METHODS.map(([v, l]) => `<option value="${v}" ${v === pl.gps_method ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div class="field"><label class="lbl">Captured at</label><input class="input" type="datetime-local" name="gps_captured_at" value="${attr(toLocalInput(pl.gps_captured_at))}"></div>
+        <div class="field"><label class="lbl">Captured by</label><input class="input" name="gps_captured_by" value="${attr(pl.gps_captured_by || "")}" placeholder="${attr(state.me?.email || "")}"></div>
+      </div>
+      <div class="field"><label class="lbl">Notes</label><textarea name="notes">${esc(pl.notes || "")}</textarea></div>
+      <div class="row-between"><span class="faint">Location, position and count come from IrisBG and are replaced by the next import. Status, GPS and notes are never touched by imports.</span>
+        <span><button type="button" class="btn" data-action="edit-planting" data-id="${pl.id}">Cancel</button> <button type="submit" class="btn primary">Save planting</button></span></div>
+    </form></td></tr>`;
+}
+
+async function savePlanting(form) {
+  const id = Number(form.dataset.id);
+  const f = new FormData(form);
+  const num = (k) => { const v = String(f.get(k) || "").trim(); return v === "" ? null : Number(v); };
+  const lat = num("latitude"), lon = num("longitude"), acc = num("gps_accuracy_m");
+  const errors = [];
+  if ((lat == null) !== (lon == null)) errors.push("Enter both latitude and longitude, or neither.");
+  if (lat != null && (!Number.isFinite(lat) || lat < -90 || lat > 90)) errors.push("Latitude must be between -90 and 90.");
+  if (lon != null && (!Number.isFinite(lon) || lon < -180 || lon > 180)) errors.push("Longitude must be between -180 and 180.");
+  if (acc != null && (!Number.isFinite(acc) || acc < 0)) errors.push("Accuracy must be a positive number of meters.");
+  const guid = String(f.get("arcgis_global_id") || "").trim().replace(/^\{|\}$/g, "");
+  // ArcGIS shows GlobalIDs wrapped in braces; the column is a plain uuid.
+  if (guid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(guid)) errors.push("ArcGIS GlobalID must look like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.");
+  if (errors.length) { toast(errors.join(" "), true); return; }
+  const capturedAt = String(f.get("gps_captured_at") || "");
+  const patch = {
+    status: f.get("status"),
+    latitude: lat, longitude: lon, gps_accuracy_m: acc,
+    gps_method: f.get("gps_method") || null,
+    gps_captured_at: capturedAt ? new Date(capturedAt).toISOString() : null,
+    gps_captured_by: norm(f.get("gps_captured_by")) || (lat != null ? state.me.email : null),
+    arcgis_global_id: guid ? guid.toLowerCase() : null,
+    notes: norm(f.get("notes")),
+  };
+  try {
+    await db.update("plantings", { id }, patch);
+    state.editingPlanting = null;
+    await reloadTables("plantings");
+    toast("Planting saved.");
+    renderPanel(); renderMain();
+  } catch (e) { toast(`Couldn't save planting: ${e.message}`, true); }
+}
+
+/* ==================== MERGE ACTIONS ==================== */
+async function mergePlants(aliasKey, keepKey) {
+  const alias = state.idx.plants.get(aliasKey), keep = state.idx.plants.get(keepKey);
+  if (!alias || !keep || aliasKey === keepKey) return;
+  try {
+    await db.insert("name_merges", [{ alias_key: aliasKey, canonical_key: keepKey, alias_name: alias.displayName, canonical_name: keep.displayName }], { returning: false });
+    await reloadTables("name_merges", "taxa");
+    if (state.selectedKey === aliasKey) state.selectedKey = keepKey;
+    state.mergeQuery = "";
+    toast(`Merged “${alias.displayName}” into “${keep.displayName}”.`);
+    render();
+  } catch (e) {
+    toast(`Couldn't merge: ${e.message}`, true);
+  }
+}
+
+async function unmerge(aliasKey) {
+  const m = state.idx.mergeMap.get(aliasKey);
+  if (!m || !confirmAction(`Unmerge “${m.alias_name}” from “${m.canonical_name}”? It will show as its own plant again.`)) return;
+  try {
+    await db.remove("name_merges", { alias_key: aliasKey });
+    await reloadTables("name_merges");
+    toast(`“${m.alias_name}” is its own plant again.`);
+    render();
+  } catch (e) { toast(`Couldn't unmerge: ${e.message}`, true); }
+}
+
+async function markNotDuplicates(a, b) {
+  const [x, y] = a < b ? [a, b] : [b, a];
+  try {
+    await db.insert("not_duplicates", [{ key_a: x, key_b: y }], { returning: false });
+  } catch (e) {
+    // The table's CHECK (key_a < key_b) uses the database collation, which
+    // can order punctuation differently from JavaScript. Retry swapped.
+    if (/check constraint|23514/i.test(e.message)) {
+      try { await db.insert("not_duplicates", [{ key_a: y, key_b: x }], { returning: false }); }
+      catch (e2) { toast(`Couldn't save: ${e2.message}`, true); return; }
+    } else { toast(`Couldn't save: ${e.message}`, true); return; }
+  }
+  await reloadTables("not_duplicates");
+  render();
+}
+
+/* ==================== POSSIBLE DUPLICATES ====================
+   Suggestions are computed here from canonical keys — cheap heuristics
+   with a reason string each, ranked by strength. Buckets keep it far from
+   O(n²): exact groupings use maps, and edit distance only compares keys
+   sharing their first two letters and within two characters in length.
+   ============================================================= */
+const NOT_EPITHET = new Set(["x", "sp", "sp.", "spp", "spp.", "hybrid", "cv.", "var.", "ssp.", "f.", "species", "form"]);
+
+function boundedLevenshtein(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function getDupes() {
+  if (!state.dupes) state.dupes = computeDupes();
+  return state.dupes;
+}
+
+function computeDupes() {
+  const plants = state.idx.list;
+  const keys = new Set(plants.map((p) => p.key));
+  const dismissed = new Set(state.data.not_duplicates.map((n) => `${n.key_a}${n.key_b}`));
+  const pairs = new Map();
+  const add = (a, b, score, reason) => {
+    if (a === b || !keys.has(a) || !keys.has(b)) return;
+    const [x, y] = a < b ? [a, b] : [b, a];
+    if (dismissed.has(`${x}${y}`) || dismissed.has(`${y}${x}`)) return;
+    const id = `${x}${y}`;
+    const e = pairs.get(id) || { a: x, b: y, score: 0, reasons: [] };
+    e.score = Math.max(e.score, score);
+    if (!e.reasons.includes(reason)) e.reasons.push(reason);
+    pairs.set(id, e);
+  };
+  const groupPairs = (map, score, reasonFn) => {
+    for (const group of map.values()) {
+      if (group.length < 2 || group.length > 12) continue;   // a huge group is a generic word, not a duplicate
+      for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) add(group[i], group[j], score, reasonFn(group[i], group[j]));
+    }
+  };
+  const tokens = (k) => k.split(" ");
+
+  // (a) identical once parenthetical notes are removed
+  const byBase = new Map();
+  for (const k of keys) {
+    if (!k.includes("(")) { (byBase.get(k) || byBase.set(k, []).get(k)).push(k); continue; }
+    const base = k.replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s+/g, " ").trim();
+    if (base) (byBase.get(base) || byBase.set(base, []).get(base)).push(k);
+  }
+  groupPairs(byBase, 0.95, () => "Same name apart from a note in parentheses");
+
+  // (b) one name's parenthetical is another plant's name (a synonym)
+  for (const k of keys) {
+    const genus = tokens(k)[0];
+    for (const m of k.matchAll(/\(([^)]+)\)/g)) {
+      let inner = m[1].trim().replace(/^(syn\.|synonym|=|formerly|aka)\s*/, "").trim();
+      const abbr = inner.match(/^([a-z])\.\s+(.+)$/);
+      if (abbr && genus && genus[0] === abbr[1]) inner = `${genus} ${abbr[2]}`;
+      if (keys.has(inner)) add(k, inner, 0.9, `“${inner}” is given in parentheses as another name`);
+    }
+  }
+
+  // (c) same genus + species, one adds words that aren't a rank, cultivar or hybrid
+  const bySpecies = new Map();
+  for (const k of keys) {
+    const t = tokens(k.replace(/\s*\([^)]*\)\s*/g, " ").trim());
+    if (t.length < 2 || !/^[a-z][a-z\-]{2,}$/.test(t[1]) || NOT_EPITHET.has(t[1])) continue;
+    const gs = `${t[0]} ${t[1]}`;
+    (bySpecies.get(gs) || bySpecies.set(gs, []).get(gs)).push(k);
+  }
+  for (const group of bySpecies.values()) {
+    if (group.length < 2 || group.length > 25) continue;
+    for (const a of group) for (const b of group) {
+      if (a === b || !b.startsWith(a + " ")) continue;
+      const extra = b.slice(a.length + 1);
+      if (/^(var\.|ssp\.|f\.|'|x |\()/.test(extra)) continue;
+      add(a, b, 0.55, `Same species; “${b}” adds “${extra}”`);
+    }
+  }
+
+  // (d) abbreviated genus: "a. parryi" vs "agave parryi"
+  const byEpithet = new Map();
+  for (const k of keys) {
+    const t = tokens(k);
+    if (t.length >= 2 && /^[a-z][a-z\-]+$/.test(t[0])) {
+      const rest = t.slice(1).join(" ");
+      (byEpithet.get(rest) || byEpithet.set(rest, []).get(rest)).push(k);
+    }
+  }
+  for (const k of keys) {
+    const m = k.match(/^([a-z])\.\s+(.+)$/);
+    if (!m) continue;
+    for (const full of byEpithet.get(m[2]) || []) if (full[0] === m[1]) add(k, full, 0.85, "Genus abbreviated in one name");
+  }
+
+  // (e) near-identical spelling (IrisBG has typos like "Eriogenum fasiculatum")
+  const buckets = new Map();
+  for (const k of keys) {
+    if (k.length <= 8) continue;
+    const b2 = k.slice(0, 2);
+    (buckets.get(b2) || buckets.set(b2, []).get(b2)).push(k);
+  }
+  for (const list of buckets.values()) {
+    list.sort((a, b) => a.length - b.length);
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length && list[j].length - list[i].length <= 2; j++) {
+        const a = list[i], b = list[j];
+        // Numbered selections ("hybrid #1" / "#2") differ by design.
+        if (a.replace(/\d/g, "") === b.replace(/\d/g, "")) continue;
+        const d = boundedLevenshtein(a, b, 2);
+        if (d <= 2) add(a, b, d === 1 ? 0.75 : 0.65, `Spelled almost the same (${plural(d, "letter")} different)`);
+      }
+    }
+  }
+
+  return [...pairs.values()].sort((x, y) => (y.score - x.score) || (y.reasons.length - x.reasons.length) || x.a.localeCompare(y.a));
+}
+
+function sourceSummary(p) {
+  const parts = [];
+  if (p.tumblr.length) parts.push(plural(p.tumblr.length, "Tumblr post"));
+  if (p.website.length) parts.push("Plant Highlight");
+  if (p.hasWib) parts.push(`What's in Bloom${p.appearances.length ? ` ×${p.appearances.length}` : ""}`);
+  if (p.accessions.length) parts.push(plural(p.accessions.length, "accession"));
+  return parts.join(" · ") || "no sources";
+}
+
+function renderDupSide(p) {
+  const accs = p.accessions.slice(0, 4).map((a) => a.accession_number).join(", ") + (p.accessions.length > 4 ? "…" : "");
+  return `<div class="side">
+    ${p.photo ? `<img loading="lazy" src="${attr(p.photo)}" alt="">` : `<div class="ph"></div>`}
+    <div style="min-width:0">
+      <div class="plant-name" style="font-size:15px"><a href="#" data-action="select" data-key="${attr(p.key)}">${esc(p.displayName)}</a></div>
+      <div class="faint">${esc(sourceSummary(p))}${p.taxon ? " · curated" : ""}</div>
+      ${accs ? `<div class="faint">Accessions: ${esc(accs)}</div>` : ""}
+      <div class="snippet">${esc(p.description || (p.wib[0]?.details?.native_to ? `Native to ${p.wib[0].details.native_to}` : ""))}</div>
+    </div></div>`;
+}
+
+function renderDuplicates() {
+  const dupes = getDupes();
+  const shown = dupes.slice(0, state.dupLimit);
+  return `<h1 class="page-title">Possible duplicates</h1>
+    <p class="muted">${dupes.length.toLocaleString()} suggested pair${dupes.length === 1 ? "" : "s"}, strongest first. Merging never changes a source record — it only tells the app and the Google Sheet to treat the names as one plant, and it can be undone from the plant's Curated tab.</p>
+    ${shown.map((d) => {
+      const a = state.idx.plants.get(d.a), b = state.idx.plants.get(d.b);
+      return `<div class="pair">
+        <div class="row-between"><span class="pill ${d.score >= 0.85 ? "sage" : d.score >= 0.65 ? "sky" : "gold"}">${d.score >= 0.85 ? "Strong" : d.score >= 0.65 ? "Likely" : "Possible"} match</span></div>
+        <ul class="reasons">${d.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+        <div class="pair-sides">${renderDupSide(a)}${renderDupSide(b)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn primary" data-action="merge" data-keep="${attr(a.key)}" data-alias="${attr(b.key)}">Merge — keep left name</button>
+          <button class="btn primary" data-action="merge" data-keep="${attr(b.key)}" data-alias="${attr(a.key)}">Merge — keep right name</button>
+          <button class="btn" data-action="not-dup" data-a="${attr(a.key)}" data-b="${attr(b.key)}">Not duplicates</button>
+        </div></div>`;
+    }).join("") || `<div class="empty">No suggestions right now.</div>`}
+    ${dupes.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dupes">Show more (${(dupes.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+}
+
+/* ==================== INCOMPLETE RECORDS ==================== */
+const GAP_FIX = {
+  photo: "Add photos to the Tumblr post or Plant Highlight; the bot picks them up on its next run.",
+  description: "Write-ups come from Tumblr and Plant Highlights — edit them there.",
+  highlight: "Plant Highlights are published on ruthbancroftgarden.org.",
+  wib: "What's in Bloom data comes from the monthly PDFs and the reference sheet.",
+  accession: "Accessions come from IrisBG — check the name matches, or merge it with the IrisBG spelling.",
+  curated: "Open the plant and fill in its Curated tab.",
+  gps: "Open the plant, then Edit a planting under Accessions to add its GPS point.",
+};
+
+function renderIncomplete() {
+  const counts = {};
+  for (const g of Object.keys(GAPS)) counts[g] = 0;
+  for (const p of state.idx.list) for (const g of p.gaps) counts[g]++;
+  const gap = state.incompleteGap;
+  const list = state.idx.list.filter((p) => p.gaps.has(gap)).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const shown = list.slice(0, state.incompleteLimit);
+  return `<h1 class="page-title">Incomplete records</h1>
+    <div class="stat-grid">${Object.entries(GAPS).map(([g, label]) => `<div class="stat" style="cursor:pointer;${g === gap ? "outline:2px solid var(--forest)" : ""}" data-action="gap" data-gap="${g}"><div class="n">${counts[g].toLocaleString()}</div><div class="l">${esc(label)}</div></div>`).join("")}</div>
+    <div class="notice">${esc(GAP_FIX[gap])}</div>
+    <div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Other gaps</th></tr></thead><tbody>
+      ${shown.map((p) => `<tr class="clickable" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td>
+        <td>${[...p.gaps].filter((g) => g !== gap).map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}</td></tr>`).join("")}
+    </tbody></table></div>
+    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-incomplete">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+}
+
+/* ==================== CACHE / SYNC ==================== */
+
+/* ==================== IRISBG IMPORT ==================== */
+
+/* ==================== GARDEN LOCATIONS ==================== */
+
+/* ==================== ADMIN: PICKLISTS, STAFF, IMPORT HISTORY ==================== */
+
+/* ==================== EVENTS ==================== */
+
+/* ==================== BOOT ==================== */
+
+</script>
+</body>
+</html>
