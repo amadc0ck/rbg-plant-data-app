@@ -383,6 +383,7 @@ async function signOut() {
   if (DEMO) { toast("Demo mode has no session."); return; }
   const s = state.session;
   clearStoredSession();
+  idbClear();
   state.session = null;
   state.me = null;
   state.phase = "login";
@@ -646,16 +647,31 @@ const db = DEMO ? demoDb : liveDb;
 
 /* ==================== LOADING ==================== */
 async function loadAll() {
-  state.phase = "loading";
-  render();
-  const results = await Promise.all(TABLES.map((t) => db.selectAll(t).then((rows) => [t, rows])));
-  for (const [t, rows] of results) state.data[t] = rows;
-  buildIndex();
+  if (DEMO) {
+    state.phase = "loading"; render();
+    for (const t of TABLES) state.data[t] = await db.selectAll(t);
+    buildIndex();
+    return;
+  }
+  // Render straight from the cache when there is one, then sync in the
+  // background and re-render once fresh data is in.
+  if (await loadCachedTables()) {
+    buildIndex();
+    state.phase = "ready"; render();
+    syncFromServer().then((note) => { console.info("[RBG] synced:", note); render(); })
+      .catch((e) => toast(`Showing saved data — couldn't refresh: ${e.message}`, true));
+    return;
+  }
+  state.phase = "loading"; render();
+  await syncFromServer();
 }
 
 async function reloadTables(...tables) {
   const results = await Promise.all(tables.map((t) => db.selectAll(t).then((rows) => [t, rows])));
-  for (const [t, rows] of results) state.data[t] = rows;
+  for (const [t, rows] of results) {
+    state.data[t] = rows;
+    if (!DEMO) idbSet(cacheKey(t), rows);
+  }
   buildIndex();
 }
 
@@ -1666,9 +1682,397 @@ function renderIncomplete() {
     ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-incomplete">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
 }
 
-/* ==================== CACHE / SYNC ==================== */
+/* ==================== CACHE / SYNC ====================
+   Egress matters on the free Supabase plan, and source_records is ~5 MB
+   of JSON. So:
+   - Every table is cached in IndexedDB (per browser) and the app renders
+     from the cache immediately on a return visit.
+   - source_records syncs incrementally: fetch only the slim columns
+     (id, synced_at) for every row, compare with the cache, then fetch full
+     rows just for ids that are new or re-stamped, and drop ids that are
+     gone. The bot re-stamps every row each run, so right after a bot run
+     this is a full refresh; between runs it costs a few KB.
+   - The small tables are re-read whole; they are tiny.
+   The cache is cleared on sign-out so staff data doesn't linger on a
+   shared computer. Demo mode never touches it.
+   ======================================================= */
+const IDB_NAME = "rbgpcm";
+const IDB_STORE = "tables";
+const INCREMENTAL_TABLES = new Set(["source_records"]);
+const ID_BATCH = 150;   // ids per in.(...) request, keeps URLs well under limits
 
-/* ==================== IRISBG IMPORT ==================== */
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) { reject(new Error("IndexedDB unavailable")); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  try {
+    const dbh = await idbOpen();
+    return await new Promise((resolve) => {
+      const r = dbh.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    });
+  } catch (e) { return null; }
+}
+async function idbSet(key, value) {
+  try {
+    const dbh = await idbOpen();
+    await new Promise((resolve) => {
+      const tx = dbh.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = resolve; tx.onerror = resolve; tx.onabort = resolve;
+    });
+  } catch (e) { /* cache is an optimisation; failures are silent */ }
+}
+async function idbClear() {
+  try {
+    const dbh = await idbOpen();
+    await new Promise((resolve) => { const tx = dbh.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).clear(); tx.oncomplete = resolve; tx.onerror = resolve; });
+  } catch (e) {}
+}
+
+// The cache belongs to one signed-in email; anyone else starts clean.
+function cacheKey(table) { return `${state.me ? state.me.email : "anon"}::${table}`; }
+
+async function loadCachedTables() {
+  let hits = 0;
+  for (const t of TABLES) {
+    const rows = await idbGet(cacheKey(t));
+    if (rows) { state.data[t] = rows; hits++; }
+  }
+  return hits === TABLES.length;
+}
+
+async function syncIncremental(table) {
+  const cached = state.data[table] || [];
+  const byId = new Map(cached.map((r) => [r.id, r]));
+  const slim = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=id,synced_at&order=id&limit=${PAGE_SIZE}&offset=${offset}`);
+    if (!res.ok) throw await pgError(res);
+    const page = await res.json();
+    slim.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  const stale = slim.filter((r) => { const c = byId.get(r.id); return !c || c.synced_at !== r.synced_at; }).map((r) => r.id);
+  const fresh = new Map();
+  for (const ids of chunk(stale, ID_BATCH)) {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=*&id=in.(${ids.join(",")})`);
+    if (!res.ok) throw await pgError(res);
+    for (const r of await res.json()) fresh.set(r.id, r);
+  }
+  const rows = slim.map((r) => fresh.get(r.id) || byId.get(r.id)).filter(Boolean);
+  return { rows, fetched: fresh.size };
+}
+
+// Pulls everything from Supabase (incrementally where possible) and
+// refreshes the cache. Returns a short description for the console.
+async function syncFromServer() {
+  const notes = [];
+  await Promise.all(TABLES.map(async (t) => {
+    if (INCREMENTAL_TABLES.has(t)) {
+      const r = await syncIncremental(t);
+      state.data[t] = r.rows;
+      notes.push(`${t}: ${r.fetched} fetched`);
+    } else {
+      state.data[t] = await db.selectAll(t);
+    }
+  }));
+  buildIndex();
+  for (const t of TABLES) idbSet(cacheKey(t), state.data[t]);
+  return notes.join(", ");
+}
+
+/* ==================== IRISBG IMPORT ====================
+   An admin picks the IrisBG .xlsx export; it is parsed in the browser
+   with no library (an .xlsx is a ZIP of XML files), previewed, and only
+   then written.
+
+   The export's own header row is mostly blank ("Accession ID, Plant Name,
+   , , QTY?, , , , Notes"), so columns are mapped BY POSITION to the IrisBG
+   fields below. Part-way down the 8.28.26 export a row of those field
+   names appears (two reports pasted together) — any such row is skipped.
+   A file whose header row IS the field names is mapped by name instead.
+
+   What an import may change is deliberately narrow:
+   - accessions: IrisBG columns only; missing from the file -> flagged
+     in_latest_export=false, never deleted.
+   - plantings: location/position/count only. Status, GPS and notes are
+     staff-owned and never sent. Missing -> flagged, never deleted.
+   - source_records (source 'irisbg'): replaced, as a raw mirror of the file.
+   ======================================================= */
+const IRIS_FIELDS = ["ItemAccNoFull", "TaxonName", "ItemLocation", "ItemLocationRef", "ItemSpecCount", "AccNoCons", "ContactCode", "OriginName", "AccComment"];
+
+async function unzipEntries(buffer, wanted) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  // End of central directory: signature 0x06054b50 within the last 65,557 bytes.
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("This doesn't look like an .xlsx file (no ZIP directory found).");
+  const count = view.getUint16(eocd + 10, true);
+  let ptr = view.getUint32(eocd + 16, true);
+  const decoder = new TextDecoder();
+  const out = {};
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(ptr, true) !== 0x02014b50) throw new Error("Corrupt .xlsx (bad central directory).");
+    const method = view.getUint16(ptr + 10, true);
+    const compSize = view.getUint32(ptr + 20, true);
+    const nameLen = view.getUint16(ptr + 28, true);
+    const extraLen = view.getUint16(ptr + 30, true);
+    const commentLen = view.getUint16(ptr + 32, true);
+    const localOffset = view.getUint32(ptr + 42, true);
+    const name = decoder.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
+    ptr += 46 + nameLen + extraLen + commentLen;
+    if (wanted && !wanted(name)) continue;
+    // Sizes in the local header can be zero (data descriptor), so the
+    // central directory's compressed size is the one to trust.
+    const lNameLen = view.getUint16(localOffset + 26, true);
+    const lExtraLen = view.getUint16(localOffset + 28, true);
+    const start = localOffset + 30 + lNameLen + lExtraLen;
+    const data = bytes.subarray(start, start + compSize);
+    let raw;
+    if (method === 0) raw = data;
+    else if (method === 8) {
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+      raw = new Uint8Array(await new Response(stream).arrayBuffer());
+    } else throw new Error(`Unsupported compression in ${name}.`);
+    out[name] = decoder.decode(raw);
+  }
+  return out;
+}
+
+function xmlDoc(text) { return new DOMParser().parseFromString(text, "application/xml"); }
+function byLocalName(node, name) { return [...node.getElementsByTagNameNS("*", name)]; }
+
+function columnIndex(ref) {
+  const letters = String(ref || "").match(/^[A-Z]+/);
+  if (!letters) return -1;
+  let n = 0;
+  for (const ch of letters[0]) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n - 1;
+}
+
+async function readXlsxRows(file) {
+  const files = await unzipEntries(await file.arrayBuffer(), (n) => /^xl\/(workbook\.xml|_rels\/workbook\.xml\.rels|sharedStrings\.xml|worksheets\/.+\.xml)$/.test(n));
+  const shared = files["xl/sharedStrings.xml"]
+    ? byLocalName(xmlDoc(files["xl/sharedStrings.xml"]), "si").map((si) => byLocalName(si, "t").map((t) => t.textContent).join(""))
+    : [];
+  // First sheet in workbook order, resolved through the relationships file.
+  let sheetPath = null;
+  if (files["xl/workbook.xml"] && files["xl/_rels/workbook.xml.rels"]) {
+    const first = byLocalName(xmlDoc(files["xl/workbook.xml"]), "sheet")[0];
+    const rid = first && (first.getAttribute("r:id") || first.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id"));
+    const rel = byLocalName(xmlDoc(files["xl/_rels/workbook.xml.rels"]), "Relationship").find((r) => r.getAttribute("Id") === rid);
+    if (rel) sheetPath = "xl/" + rel.getAttribute("Target").replace(/^\/?xl\//, "").replace(/^\//, "");
+  }
+  if (!sheetPath || !files[sheetPath]) sheetPath = Object.keys(files).filter((k) => k.startsWith("xl/worksheets/")).sort()[0];
+  if (!sheetPath) throw new Error("No worksheet found in the file.");
+  const rows = [];
+  for (const row of byLocalName(xmlDoc(files[sheetPath]), "row")) {
+    const cells = [];
+    byLocalName(row, "c").forEach((c, i) => {
+      const col = c.getAttribute("r") ? columnIndex(c.getAttribute("r")) : i;
+      const type = c.getAttribute("t");
+      const v = byLocalName(c, "v")[0];
+      let value = "";
+      if (type === "s") value = v ? shared[Number(v.textContent)] ?? "" : "";
+      else if (type === "inlineStr") value = byLocalName(c, "t").map((t) => t.textContent).join("");
+      else value = v ? v.textContent : "";
+      cells[col] = value;
+    });
+    rows.push(Array.from(cells, (x) => (x == null ? "" : String(x).trim())));
+  }
+  return rows;
+}
+
+function parseIrisRows(rows) {
+  const headerIdx = rows.findIndex((r) => r.some((c) => c !== ""));
+  if (headerIdx < 0) throw new Error("The sheet is empty.");
+  const header = rows[headerIdx];
+  // Map by name when the header row carries the IrisBG field names,
+  // otherwise by position (the known export layout).
+  const named = IRIS_FIELDS.every((f) => header.includes(f));
+  const colOf = Object.fromEntries(IRIS_FIELDS.map((f, i) => [f, named ? header.indexOf(f) : i]));
+  const items = [];
+  const bad = [];
+  const seen = new Set();
+  rows.slice(headerIdx + 1).forEach((r, i) => {
+    const rowNo = headerIdx + i + 2;
+    if (!r.some((c) => c !== "")) return;
+    const raw = Object.fromEntries(IRIS_FIELDS.map((f) => [f, r[colOf[f]] ?? ""]));
+    if (raw.ItemAccNoFull === "ItemAccNoFull") return;   // embedded field-name row
+    const full = raw.ItemAccNoFull;
+    const slash = full.lastIndexOf("/");
+    if (!full || slash <= 0 || slash === full.length - 1) { bad.push({ rowNo, reason: `Accession ID “${full}” isn't in the form 2016-0059/1`, raw }); return; }
+    if (!raw.TaxonName) { bad.push({ rowNo, reason: "No plant name", raw }); return; }
+    if (seen.has(full)) { bad.push({ rowNo, reason: `Duplicate row for ${full}`, raw }); return; }
+    seen.add(full);
+    const loc = raw.ItemLocation.split("•").map((x) => x.trim()).filter(Boolean);
+    items.push({
+      full, raw,
+      accession_number: full.slice(0, slash),
+      item_qualifier: full.slice(slash + 1),
+      plant_name: raw.TaxonName,
+      location_code: norm(raw.ItemLocation),
+      bed: loc[0] || null,
+      sub_location: loc[1] || null,
+      location_ref: norm(raw.ItemLocationRef),
+      specimen_count: norm(raw.ItemSpecCount),
+    });
+  });
+  return { items, bad, mappedBy: named ? "header names" : "column position" };
+}
+
+const ACC_COLS = ["plant_name", "irisbg_acc_no_cons", "contact_code", "origin_name", "comment"];
+const PLANTING_COLS = ["location_code", "bed", "sub_location", "location_ref", "specimen_count"];
+
+function buildImportPlan(fileName, parsed) {
+  const accs = new Map();
+  const conflicts = [];
+  for (const it of parsed.items) {
+    const a = accs.get(it.accession_number);
+    const fields = {
+      accession_number: it.accession_number, plant_name: it.plant_name,
+      irisbg_acc_no_cons: norm(it.raw.AccNoCons), contact_code: norm(it.raw.ContactCode),
+      origin_name: norm(it.raw.OriginName), comment: norm(it.raw.AccComment),
+    };
+    if (!a) { accs.set(it.accession_number, { fields, items: [it] }); continue; }
+    a.items.push(it);
+    if (a.fields.plant_name !== it.plant_name) conflicts.push(`${it.accession_number}: “${a.fields.plant_name}” vs “${it.plant_name}”`);
+    // Accession-level columns: first non-empty wins.
+    for (const c of ACC_COLS) if (a.fields[c] == null && fields[c] != null) a.fields[c] = fields[c];
+  }
+  const existingAcc = new Map(state.data.accessions.map((a) => [a.accession_number, a]));
+  const existingPl = new Map(state.data.plantings.map((p) => [`${p.accession_id}/${p.item_qualifier}`, p]));
+  const same = (x, y) => (x == null ? "" : String(x)) === (y == null ? "" : String(y));
+  const plan = { fileName, parsed, accs, conflicts, acc: { new: 0, changed: 0, unchanged: 0, missing: 0, restored: 0 }, pl: { new: 0, changed: 0, unchanged: 0, missing: 0 } };
+  for (const [num, a] of accs) {
+    const ex = existingAcc.get(num);
+    if (!ex) { plan.acc.new++; plan.pl.new += a.items.length; continue; }
+    if (!ex.in_latest_export) plan.acc.restored++;
+    if (ACC_COLS.every((c) => same(ex[c], a.fields[c]))) plan.acc.unchanged++; else plan.acc.changed++;
+    for (const it of a.items) {
+      const ep = existingPl.get(`${ex.id}/${it.item_qualifier}`);
+      if (!ep) plan.pl.new++;
+      else if (PLANTING_COLS.every((c) => same(ep[c], it[c])) && ep.in_latest_export) plan.pl.unchanged++;
+      else plan.pl.changed++;
+    }
+  }
+  const inFile = new Set(parsed.items.map((it) => it.full));
+  const accById = new Map(state.data.accessions.map((a) => [a.id, a]));
+  plan.acc.missing = state.data.accessions.filter((a) => a.in_latest_export && !accs.has(a.accession_number)).length;
+  plan.pl.missing = state.data.plantings.filter((p) => p.in_latest_export && accById.get(p.accession_id) && !inFile.has(`${accById.get(p.accession_id).accession_number}/${p.item_qualifier}`)).length;
+  return plan;
+}
+
+async function handleIrisFile(file) {
+  state.importState = { phase: "reading", fileName: file.name };
+  renderMain();
+  try {
+    const rows = await readXlsxRows(file);
+    const parsed = parseIrisRows(rows);
+    state.importState = { phase: "preview", fileName: file.name, rowsRead: rows.length, plan: buildImportPlan(file.name, parsed) };
+  } catch (e) {
+    state.importState = { phase: "error", fileName: file.name, error: e.message };
+  }
+  renderMain();
+}
+
+function setImportProgress(done, total, label) {
+  const bar = document.getElementById("import-bar");
+  const txt = document.getElementById("import-progress-label");
+  if (bar) bar.style.width = `${Math.round((done / Math.max(total, 1)) * 100)}%`;
+  if (txt) txt.textContent = label;
+}
+
+async function runIrisImport() {
+  const st = state.importState;
+  const plan = st.plan;
+  const written = [];
+  st.phase = "writing"; st.written = written;
+  renderMain();
+  const items = plan.parsed.items;
+  const accList = [...plan.accs.values()];
+  const steps = 3 + Math.ceil(accList.length / WRITE_BATCH) + Math.ceil(items.length / WRITE_BATCH) * 2;
+  let step = 0;
+  const tick = (label) => setImportProgress(++step, steps, label);
+  try {
+    const summary = {
+      rows_read: st.rowsRead, items: items.length, accessions: accList.length, unparseable_rows: plan.parsed.bad.length,
+      accessions_new: plan.acc.new, accessions_changed: plan.acc.changed, accessions_flagged_missing: plan.acc.missing,
+      plantings_new: plan.pl.new, plantings_changed: plan.pl.changed, plantings_flagged_missing: plan.pl.missing,
+      taxon_name_conflicts: plan.conflicts.length,
+    };
+    const [imp] = await db.insert("irisbg_imports", [{ file_name: plan.fileName, summary }]);
+    written.push(`Import record #${imp.id} created`);
+    tick("Saving accessions…");
+
+    const accId = new Map();
+    for (const batch of chunk(accList, WRITE_BATCH)) {
+      const saved = await db.insert("accessions", batch.map((a) => ({ ...a.fields, in_latest_export: true, last_import_id: imp.id })), { onConflict: "accession_number" });
+      saved.forEach((r) => accId.set(r.accession_number, r.id));
+      tick(`Saved ${accId.size.toLocaleString()} of ${accList.length.toLocaleString()} accessions`);
+    }
+    written.push(`${accId.size.toLocaleString()} accessions saved`);
+
+    const missingAcc = state.data.accessions.filter((a) => a.in_latest_export && !plan.accs.has(a.accession_number)).map((a) => a.id);
+    for (const ids of chunk(missingAcc, ID_BATCH)) await db.update("accessions", { id: { in: ids } }, { in_latest_export: false });
+    if (missingAcc.length) written.push(`${missingAcc.length} accessions flagged as not in this export`);
+    tick("Saving plantings…");
+
+    let plDone = 0;
+    const savedPlantingIds = new Set();
+    for (const batch of chunk(items, WRITE_BATCH)) {
+      const saved = await db.insert("plantings", batch.map((it) => ({
+        accession_id: accId.get(it.accession_number), item_qualifier: it.item_qualifier,
+        location_code: it.location_code, bed: it.bed, sub_location: it.sub_location,
+        location_ref: it.location_ref, specimen_count: it.specimen_count, in_latest_export: true,
+      })), { onConflict: "accession_id,item_qualifier" });
+      saved.forEach((r) => savedPlantingIds.add(r.id));
+      plDone += batch.length;
+      tick(`Saved ${plDone.toLocaleString()} of ${items.length.toLocaleString()} plantings`);
+    }
+    written.push(`${plDone.toLocaleString()} plantings saved`);
+
+    const missingPl = state.data.plantings.filter((p) => p.in_latest_export && !savedPlantingIds.has(p.id)).map((p) => p.id);
+    for (const ids of chunk(missingPl, ID_BATCH)) await db.update("plantings", { id: { in: ids } }, { in_latest_export: false });
+    if (missingPl.length) written.push(`${missingPl.length} plantings flagged as not in this export`);
+    tick("Replacing the IrisBG source mirror…");
+
+    await db.remove("source_records", { source: "irisbg" });
+    written.push("Old IrisBG source rows removed");
+    let srcDone = 0;
+    for (const batch of chunk(items, WRITE_BATCH)) {
+      await db.insert("source_records", batch.map((it) => ({ source: "irisbg", source_id: it.full, plant_name: it.plant_name, details: it.raw })), { returning: false });
+      srcDone += batch.length;
+      tick(`Mirrored ${srcDone.toLocaleString()} of ${items.length.toLocaleString()} IrisBG rows`);
+    }
+    written.push(`${srcDone.toLocaleString()} IrisBG source rows saved`);
+
+    await reloadTables("accessions", "plantings", "irisbg_imports");
+    // source_records changed only for 'irisbg'; refetch just those rows.
+    const iris = DEMO ? await db.select("source_records", { source: "irisbg" }) : await liveDb.select("source_records", { source: "irisbg" });
+    state.data.source_records = state.data.source_records.filter((r) => r.source !== "irisbg").concat(iris);
+    if (!DEMO) idbSet(cacheKey("source_records"), state.data.source_records);
+    buildIndex();
+    st.phase = "done";
+  } catch (e) {
+    st.phase = "failed";
+    st.error = e.message;
+  }
+  render();
+}
+
+/* ---- import: screen ---- */
 
 /* ==================== GARDEN LOCATIONS ==================== */
 
