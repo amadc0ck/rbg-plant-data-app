@@ -2263,10 +2263,176 @@ async function addStaff(form) {
   } catch (e) { toast(`Couldn't add: ${e.message}`, true); }
 }
 
-/* ==================== EVENTS ==================== */
+/* ==================== EVENTS ====================
+   One delegated listener per event type. Elements declare what they do
+   with data-action; forms are identified by id or data attribute.
+   ================================================ */
+let searchTimer = null;
+
+function selectPlant(key) {
+  if (state.selectedKey !== key) { state.mergeQuery = ""; state.editingPlanting = null; }
+  state.selectedKey = key;
+  renderPanel();
+  document.querySelectorAll(".card.selected, tr.selected").forEach((el) => el.classList.remove("selected"));
+  document.querySelectorAll(`[data-action="select"][data-key="${CSS.escape(key)}"]`).forEach((el) => { if (el.matches(".card, tr")) el.classList.add("selected"); });
+  const panel = document.getElementById("panel");
+  if (panel) panel.scrollTop = 0;
+}
+
+document.addEventListener("click", async (ev) => {
+  const el = ev.target.closest("[data-action]");
+  if (!el) return;
+  const a = el.dataset.action;
+  if (el.tagName === "A" && a !== "lightbox") ev.preventDefault();
+  switch (a) {
+    case "sign-in": signInWithGoogle(); break;
+    case "sign-out": signOut(); break;
+    case "retry": boot(); break;
+    case "view": state.view = el.dataset.view; render(); window.scrollTo(0, 0); break;
+    case "mode": state.browse.mode = el.dataset.mode; state.browse.limit = el.dataset.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE; renderMain(); break;
+    case "more": state.browse.limit += state.browse.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE; renderMain(); break;
+    case "reset-filters": Object.assign(state.browse, { q: "", source: "", genus: "", family: "", curated: "", gap: "", sort: "name" }); render(); break;
+    case "select": selectPlant(el.dataset.key); break;
+    case "close-panel": state.selectedKey = null; render(); break;
+    case "next-plant": {
+      const list = state.lastList && state.lastList.length ? state.lastList : state.idx.list.map((p) => p.key);
+      const i = list.indexOf(resolveKey(state.selectedKey));
+      selectPlant(list[(i + 1) % list.length]);
+      break;
+    }
+    case "tab": state.tab = el.dataset.tab; renderPanel(); break;
+    case "lightbox": openLightbox(el.dataset.src); break;
+    case "close-lightbox": document.getElementById("overlay").innerHTML = ""; break;
+    case "use-sugg": useSuggestion(el); break;
+    case "delete-taxon": deleteTaxon(); break;
+    case "edit-planting": state.editingPlanting = state.editingPlanting === Number(el.dataset.id) ? null : Number(el.dataset.id); renderPanel(); break;
+    case "merge": mergePlants(el.dataset.alias, el.dataset.keep); break;
+    case "unmerge": unmerge(el.dataset.alias); break;
+    case "not-dup": markNotDuplicates(el.dataset.a, el.dataset.b); break;
+    case "more-dupes": state.dupLimit += 25; renderMain(); break;
+    case "gap": state.incompleteGap = el.dataset.gap; state.incompleteLimit = 100; renderMain(); break;
+    case "more-incomplete": state.incompleteLimit += 100; renderMain(); break;
+    case "admin-tab": state.adminTab = el.dataset.tab; renderMain(); break;
+    case "run-import": runIrisImport(); break;
+    case "cancel-import": state.importState = null; renderMain(); break;
+    case "move-opt": moveOption(el.dataset.list, el.dataset.value, Number(el.dataset.dir)); break;
+    case "delete-opt": deleteOption(el.dataset.list, el.dataset.value); break;
+    case "toggle-admin": {
+      const email = el.dataset.email;
+      try { await db.update("staff", { email }, { is_admin: el.checked }); await reloadTables("staff"); toast(`${email} is ${el.checked ? "now" : "no longer"} an admin.`); }
+      catch (e) { el.checked = !el.checked; toast(`Couldn't change: ${e.message}`, true); }
+      break;
+    }
+    case "remove-staff": {
+      const email = el.dataset.email;
+      if (!confirmAction(`Remove ${email}? They won't be able to sign in.`)) break;
+      try { await db.remove("staff", { email }); await reloadTables("staff"); renderMain(); }
+      catch (e) { toast(`Couldn't remove: ${e.message}`, true); }
+      break;
+    }
+    default: break;
+  }
+});
+
+document.addEventListener("input", (ev) => {
+  const t = ev.target;
+  if (t.id === "search") {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.browse.q = t.value;
+      state.browse.limit = state.browse.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE;
+      if (state.view !== "browse") { state.view = "browse"; render(); document.getElementById("search")?.focus(); }
+      else renderMain();
+    }, 180);
+  } else if (t.id === "merge-search") {
+    state.mergeQuery = t.value;
+    const p = selectedPlant();
+    const box = document.getElementById("merge-results");
+    if (p && box) box.innerHTML = renderMergeResults(p);
+  } else if (t.closest && t.closest("#curated-form")) {
+    // A hand edit after "Use" makes the value typed-in unless it still
+    // matches the suggestion exactly (checked again at save time).
+    const holder = t.dataset.field ? t : t.closest("[data-field]");
+    if (holder) holder.classList.add("dirty");
+  }
+});
+
+document.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t.dataset.filter) {
+    state.browse[t.dataset.filter] = t.value;
+    state.browse.limit = state.browse.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE;
+    renderMain();
+  } else if (t.id === "iris-file" && t.files && t.files[0]) {
+    handleIrisFile(t.files[0]);
+  } else if (t.dataset.loc) {
+    saveLocation(t);
+  } else if (t.dataset.renameList) {
+    renameOption(t);
+  } else if (t.dataset.multi || (t.closest && t.closest("#curated-form"))) {
+    const holder = t.dataset.field ? t : t.closest("[data-field]");
+    if (holder) holder.classList.add("dirty");
+  }
+});
+
+document.addEventListener("submit", (ev) => {
+  const f = ev.target;
+  if (f.id === "curated-form") { ev.preventDefault(); saveCurated(f); }
+  else if (f.id === "planting-form") { ev.preventDefault(); savePlanting(f); }
+  else if (f.id === "add-staff") { ev.preventDefault(); addStaff(f); }
+  else if (f.dataset.addOpt) { ev.preventDefault(); addOption(f); }
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    if (document.querySelector(".lightbox")) document.getElementById("overlay").innerHTML = "";
+    else if (state.selectedKey && !ev.target.closest("input, textarea, select")) { state.selectedKey = null; render(); }
+  }
+});
 
 /* ==================== BOOT ==================== */
+async function loadMe() {
+  const rows = await liveDb.select("staff", { email: state.session.email });
+  return rows[0] || null;
+}
 
+async function boot() {
+  state.error = null;
+  if (DEMO) {
+    try {
+      const res = await fetch("demo-data.json", { cache: "no-store" });
+      if (!res.ok) throw new Error("demo-data.json not found — demo mode needs the local snapshot.");
+      demoDb.store = await res.json();
+      for (const t of TABLES) demoDb.store[t] = demoDb.store[t] || [];
+      state.me = { email: "demo@local", display_name: "Demo", is_admin: true };
+      await loadAll();
+      state.phase = "ready";
+    } catch (e) { state.phase = "error"; state.error = e.message; }
+    render();
+    return;
+  }
+  const redirect = consumeAuthRedirect();
+  if (redirect && redirect.error) { state.phase = "login"; state.error = `Google sign-in failed: ${redirect.error}`; render(); return; }
+  if (redirect && redirect.session) saveSession(redirect.session);
+  state.session = (redirect && redirect.session) || loadStoredSession();
+  if (!state.session) { state.phase = "login"; render(); return; }
+  try {
+    await ensureFreshSession();
+    if (!state.session) { state.phase = "login"; render(); return; }
+    // RLS only returns your own staff row if you're on the list, so an
+    // empty result means "signed in, not staff".
+    state.me = await loadMe();
+    if (!state.me) { state.phase = "notstaff"; render(); return; }
+    await loadAll();
+    state.phase = "ready";
+  } catch (e) {
+    state.phase = "error";
+    state.error = e.message;
+  }
+  render();
+}
+
+boot();
 </script>
 </body>
 </html>
