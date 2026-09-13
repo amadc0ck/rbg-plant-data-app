@@ -506,11 +506,18 @@ const liveDb = {
       if (page.length < PAGE_SIZE) return rows;
     }
   },
+  // Paged like selectAll: the IrisBG mirror alone is ~4,000 rows, and an
+  // unpaged read would silently stop at 1,000.
   async select(table, filter) {
-    const params = ["select=*", ...pgFilterParams(filter)];
-    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${params.join("&")}`);
-    if (!res.ok) throw await pgError(res);
-    return res.json();
+    const rows = [];
+    const params = ["select=*", ...pgFilterParams(filter), `order=${TABLE_ORDER[table]}`, `limit=${PAGE_SIZE}`];
+    for (let offset = 0; ; offset += PAGE_SIZE) {
+      const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?${params.join("&")}&offset=${offset}`);
+      if (!res.ok) throw await pgError(res);
+      const page = await res.json();
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) return rows;
+    }
   },
   // rows: array. onConflict: "col,col" makes it an upsert that only updates
   // the columns present in the payload (PostgREST merge-duplicates).
