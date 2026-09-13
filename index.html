@@ -241,7 +241,7 @@ const SHEET_PAGE = 200;
 // sign-in; it never talks to Supabase.
 const DEMO = new URLSearchParams(location.search).has("demo");
 
-const SOURCE_LABELS = { tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG" };
+const SOURCE_LABELS = { tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG", accession: "IrisBG accession", "wib edition": "What's in Bloom edition" };
 const PROVENANCE_LABELS = {
   tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG",
   iucn: "IUCN", manual: "typed in", derived: "derived",
@@ -759,6 +759,10 @@ function finalizePlant(p, canonicalNames) {
     (p.tumblr[0] && p.tumblr[0].plant_name) || (p.website[0] && p.website[0].plant_name) ||
     (p.wib[0] && p.wib[0].plant_name) || (p.irisbg[0] && p.irisbg[0].plant_name) ||
     (p.accessions[0] && p.accessions[0].plant_name) || (p.appearances[0] && p.appearances[0].plant_name) || p.key;
+  // A few Tumblr posts start with a stray "-" or "." ("-Gasteria pulchra").
+  p.displayName = String(p.displayName).replace(/^[\s\-–—.,;:]+/, "");
+  // Sorting ignores a leading hybrid sign so "×Mangave" files under M.
+  p.sortName = p.displayName.replace(/^[×x]\s*(?=[A-Z])/, "").toLowerCase();
   p.genus = (p.taxon && p.taxon.genus) || firstWord(p.displayName);
   p.family = (p.taxon && p.taxon.family) || "";
   const photoRec = p.tumblr.find((r) => r.photo_url) || p.website.find((r) => r.photo_url);
@@ -887,7 +891,7 @@ function filteredPlants() {
     if (b.gap && !p.gaps.has(b.gap)) return false;
     return true;
   });
-  const byName = (a, c) => a.displayName.localeCompare(c.displayName);
+  const byName = (a, c) => a.sortName.localeCompare(c.sortName);
   if (b.sort === "sources") list.sort((a, c) => (c.sourceCount - a.sourceCount) || byName(a, c));
   else if (b.sort === "recent") list.sort((a, c) => String(c.latestPost).localeCompare(String(a.latestPost)) || byName(a, c));
   else list.sort(byName);
@@ -942,7 +946,7 @@ function plantPills(p) {
 function renderGallery(list) {
   return `<div class="grid">${list.map((p) => `
     <div class="card ${state.selectedKey === p.key ? "selected" : ""}" data-action="select" data-key="${attr(p.key)}">
-      <div class="photo">${p.photo ? `<img loading="lazy" src="${attr(p.photo)}" alt="">` : "No photo"}</div>
+      <div class="photo">${p.photo ? `<img loading="lazy" referrerpolicy="no-referrer" src="${attr(p.photo)}" alt="">` : "No photo"}</div>
       <div class="body">
         <div class="plant-name">${esc(p.displayName)}</div>
         <div class="plant-sub">${esc([p.taxon?.common_name, p.family || p.genus].filter(Boolean).join(" · "))}</div>
@@ -1310,8 +1314,11 @@ async function saveCurated(form) {
     patch[field.f] = field.type === "multi" ? (value || []) : value;
     const holder = document.getElementById(`cf-${field.f}`);
     const fromSugg = holder && holder.dataset.provSource && holder.dataset.provValue === JSON.stringify(value);
+    // A new record's display name defaults to the name the app shows; only
+    // an edited one counts as typed in.
+    const defaultName = !t && field.f === "display_name" && value === p.displayName;
     provenance[field.f] = {
-      source: fromSugg ? holder.dataset.provSource : "manual",
+      source: fromSugg ? holder.dataset.provSource : defaultName ? "derived" : "manual",
       source_record_id: fromSugg && holder.dataset.provRecord ? Number(holder.dataset.provRecord) : null,
       by: state.me.email, at: now,
     };
