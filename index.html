@@ -798,7 +798,9 @@ function finalizePlant(p, canonicalNames) {
 
 function syncedAt() {
   let max = "";
-  for (const r of state.data.source_records) if (r.synced_at && r.synced_at > max) max = r.synced_at;
+  // Bot sources only: IrisBG rows are stamped when an admin imports, which
+  // says nothing about when Tumblr/website/WIB were last refreshed.
+  for (const r of state.data.source_records) if (r.source !== "irisbg" && r.synced_at && r.synced_at > max) max = r.synced_at;
   return max;
 }
 
