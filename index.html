@@ -299,6 +299,9 @@ function escapeHtml(v) {
 }
 const esc = escapeHtml;
 function attr(v) { return escapeHtml(v); }
+// Links built from synced or imported data only ever point at web pages.
+// Escaping alone would still let a "javascript:" URL through as a working link.
+function safeUrl(v) { return /^https?:\/\//i.test(String(v || "")) ? attr(v) : "#"; }
 function blank(v) { return v == null || (typeof v === "string" && v.trim() === ""); }
 function norm(v) { return blank(v) ? null : String(v).trim(); }
 function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + "s")}`; }
@@ -673,8 +676,11 @@ async function loadAll() {
   await syncFromServer();
 }
 
+// After a write. Stamped tables go through syncIncremental, so saving one
+// planting's GPS fetches ids + stamps and that one row -- not all ~4,000.
 async function reloadTables(...tables) {
-  const results = await Promise.all(tables.map((t) => db.selectAll(t).then((rows) => [t, rows])));
+  const results = await Promise.all(tables.map((t) =>
+    (!DEMO && STAMP_COLUMN[t] ? syncIncremental(t).then((r) => r.rows) : db.selectAll(t)).then((rows) => [t, rows])));
   for (const [t, rows] of results) {
     state.data[t] = rows;
     if (!DEMO) idbSet(cacheKey(t), rows);
@@ -1015,15 +1021,15 @@ function renderTumblrTab(p) {
       ${thumbs([r.photo_url, r.detail_photo_url])}
       <div class="post-text">${esc(r.description || "(no text)")}</div>
       ${r.tags && r.tags.length ? `<div class="pills" style="margin-top:6px">${r.tags.map((t) => `<span class="pill">#${esc(t)}</span>`).join("")}</div>` : ""}
-      <div style="margin-top:6px"><a href="${attr(r.link)}" target="_blank" rel="noopener">Open on Tumblr ↗</a>
-      ${r.details && r.details.website_link ? ` · <a href="${attr(r.details.website_link)}" target="_blank" rel="noopener">Matching Plant Highlight ↗</a>` : ""}</div>
+      <div style="margin-top:6px"><a href="${safeUrl(r.link)}" target="_blank" rel="noopener">Open on Tumblr ↗</a>
+      ${r.details && r.details.website_link ? ` · <a href="${safeUrl(r.details.website_link)}" target="_blank" rel="noopener">Matching Plant Highlight ↗</a>` : ""}</div>
     </div>`).join("");
 }
 
 function renderHighlightTab(p) {
   if (!p.website.length) {
     return p.highlightLink
-      ? `<div class="box">No Plant Highlight record was scraped under this name, but a Tumblr post links to one: <a href="${attr(p.highlightLink)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>`
+      ? `<div class="box">No Plant Highlight record was scraped under this name, but a Tumblr post links to one: <a href="${safeUrl(p.highlightLink)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>`
       : `<div class="empty">No Plant Highlight for this plant.</div>`;
   }
   return p.website.map((r) => `<div class="box">
@@ -1031,7 +1037,7 @@ function renderHighlightTab(p) {
         <span class="faint">${esc([r.details?.author, r.details?.date_label].filter(Boolean).join(" · "))}</span></div>
       ${thumbs([r.photo_url, r.detail_photo_url])}
       <div class="post-text">${esc(r.description || "(no text)")}</div>
-      <div style="margin-top:6px"><a href="${attr(r.link)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>
+      <div style="margin-top:6px"><a href="${safeUrl(r.link)}" target="_blank" rel="noopener">Open Plant Highlight ↗</a></div>
     </div>`).join("");
 }
 
@@ -1041,7 +1047,7 @@ function editionsList(p) {
   if (!p.appearances.length) return `<div class="faint">Not found in any parsed What's in Bloom PDF.</div>`;
   return `<table class="sheet"><thead><tr><th>Edition</th><th>Listed as</th><th>PDF</th></tr></thead><tbody>
     ${p.appearances.map((a) => `<tr><td>${esc(editionLabel(a.edition))}</td><td>${esc(a.plant_name)}</td>
-      <td><a href="${attr(a.edition.pdf_url)}" target="_blank" rel="noopener">${esc(decodeURIComponent(a.edition.pdf_url.split("/").pop()))} ↗</a></td></tr>`).join("")}
+      <td><a href="${safeUrl(a.edition.pdf_url)}" target="_blank" rel="noopener">${esc(decodeURIComponent(a.edition.pdf_url.split("/").pop()))} ↗</a></td></tr>`).join("")}
     </tbody></table>`;
 }
 
@@ -1719,7 +1725,11 @@ function renderIncomplete() {
    ======================================================= */
 const IDB_NAME = "rbgpcm";
 const IDB_STORE = "tables";
-const INCREMENTAL_TABLES = new Set(["source_records"]);
+// Tables large enough to sync by change stamp, and the column that changes
+// whenever a row does. taxa/accessions/plantings use updated_at (touch trigger
+// on update, default now() on insert); source_records uses the bot's
+// synced_at. Everything else is small enough to re-read whole.
+const STAMP_COLUMN = { source_records: "synced_at", taxa: "updated_at", accessions: "updated_at", plantings: "updated_at" };
 const ID_BATCH = 150;   // ids per in.(...) request, keeps URLs well under limits
 
 function idbOpen() {
@@ -1771,17 +1781,18 @@ async function loadCachedTables() {
 }
 
 async function syncIncremental(table) {
+  const stamp = STAMP_COLUMN[table];
   const cached = state.data[table] || [];
   const byId = new Map(cached.map((r) => [r.id, r]));
   const slim = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
-    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=id,synced_at&order=id&limit=${PAGE_SIZE}&offset=${offset}`);
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=id,${stamp}&order=id&limit=${PAGE_SIZE}&offset=${offset}`);
     if (!res.ok) throw await pgError(res);
     const page = await res.json();
     slim.push(...page);
     if (page.length < PAGE_SIZE) break;
   }
-  const stale = slim.filter((r) => { const c = byId.get(r.id); return !c || c.synced_at !== r.synced_at; }).map((r) => r.id);
+  const stale = slim.filter((r) => { const c = byId.get(r.id); return !c || c[stamp] !== r[stamp]; }).map((r) => r.id);
   const fresh = new Map();
   for (const ids of chunk(stale, ID_BATCH)) {
     const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=*&id=in.(${ids.join(",")})`);
@@ -1797,7 +1808,7 @@ async function syncIncremental(table) {
 async function syncFromServer() {
   const notes = [];
   await Promise.all(TABLES.map(async (t) => {
-    if (INCREMENTAL_TABLES.has(t)) {
+    if (STAMP_COLUMN[t]) {
       const r = await syncIncremental(t);
       state.data[t] = r.rows;
       notes.push(`${t}: ${r.fetched} fetched`);
