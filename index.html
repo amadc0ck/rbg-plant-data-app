@@ -1572,12 +1572,17 @@ function computeDupes() {
     const gs = `${t[0]} ${t[1]}`;
     (bySpecies.get(gs) || bySpecies.set(gs, []).get(gs)).push(k);
   }
+  // Tuned on the real data: "hybrid"/"crest" name a different plant, and a
+  // second genus ("agave lophantha gasteria excelsa") is a Tumblr post
+  // about two plants, not a spelling of one.
+  const genera = new Set([...keys].map((k) => tokens(k)[0]));
   for (const group of bySpecies.values()) {
     if (group.length < 2 || group.length > 25) continue;
     for (const a of group) for (const b of group) {
       if (a === b || !b.startsWith(a + " ")) continue;
       const extra = b.slice(a.length + 1);
-      if (/^(var\.|ssp\.|f\.|'|x |\()/.test(extra)) continue;
+      if (/^(var\.|ssp\.|f\.|'|x |\(|hybrid|crest|cristat|monstros|seedling|cv\.|cultivar)/.test(extra)) continue;
+      if (genera.has(tokens(extra)[0]) && tokens(extra)[0].length > 3) continue;
       add(a, b, 0.55, `Same species; “${b}” adds “${extra}”`);
     }
   }
