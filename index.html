@@ -163,9 +163,13 @@ table.sheet .name { font-family: var(--serif); font-weight: 600; }
 
 /* duplicates */
 .pair { background: var(--paper); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px; margin-bottom: 14px; }
-.pair-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 700px) { .pair-sides { grid-template-columns: 1fr; } }
 .side { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; gap: 10px; }
+.members { display: grid; gap: 8px; margin-top: 8px; }
+.member { align-items: flex-start; }
+.member .tick { padding-top: 24px; }
+.member-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; flex-shrink: 0; }
+.member .reasons { margin: 4px 0 0; font-size: 12px; }
+@media (max-width: 700px) { .member { flex-wrap: wrap; } .member-actions { flex-direction: row; align-items: center; } }
 .side img, .side .ph { width: 84px; height: 70px; object-fit: cover; border-radius: 8px; background: var(--cream-deep); flex-shrink: 0; }
 .reasons { margin: 8px 0; padding-left: 18px; font-size: 13px; color: var(--ink-soft); }
 .snippet { font-size: 12px; color: var(--ink-soft); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -177,6 +181,9 @@ table.sheet .name { font-family: var(--serif); font-weight: 600; }
 .stat { background: var(--paper); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); }
 .stat .n { font-size: 22px; font-weight: 700; font-family: var(--serif); }
 .stat .l { font-size: 12px; color: var(--ink-soft); }
+.stat.clickable { cursor: pointer; }
+.stat.active { outline: 2px solid var(--forest); }
+.dash-h { font-family: var(--serif); font-size: 17px; margin: 18px 0 4px; }
 .page-title { font-family: var(--serif); font-size: 24px; margin: 0 0 4px; }
 .notice { background: var(--gold-soft); color: var(--gold); padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
 .notice.bad { background: var(--danger-soft); color: var(--danger); }
@@ -228,8 +235,8 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.0.0";
-const APP_UPDATED = "2026-09-12";
+const APP_VERSION = "1.1.0";
+const APP_UPDATED = "2026-09-13";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
@@ -257,7 +264,7 @@ const GPS_METHODS = [
 const PLANTING_STATUS = ["alive", "dead", "removed", "unknown"];
 const GAPS = {
   photo: "No photo", description: "No description", highlight: "No Plant Highlight", wib: "No What's in Bloom data",
-  accession: "No accession", curated: "No curated record", gps: "No GPS on any planting",
+  accession: "No accession", curated: "No curated record",
 };
 
 /* ==================== STATE ==================== */
@@ -280,15 +287,16 @@ const state = {
   data: Object.fromEntries(TABLES.map((t) => [t, []])),
   idx: null,              // derived plant index, rebuilt by buildIndex()
   dupes: null,            // cached duplicate suggestions
-  view: "browse",
+  view: "dashboard",
   browse: { q: "", source: "", genus: "", family: "", curated: "", gap: "", sort: "name", mode: "gallery", limit: GALLERY_PAGE },
   selectedKey: null,
   tab: "curated",
   dupLimit: 25,
-  incompleteGap: "photo",
-  incompleteLimit: 100,
+  dashTile: "all4",       // which dashboard number's plant list is showing
+  dashLimit: 100,
   importState: null,      // IrisBG import wizard state
   mergeQuery: "",
+  mergePicks: new Set(),  // plant keys ticked in the panel's merge search
   editingPlanting: null,  // planting id being edited
   adminTab: "import",
 };
@@ -796,7 +804,8 @@ function finalizePlant(p, canonicalNames) {
   if (!p.hasWib) p.gaps.add("wib");
   if (!p.accessions.length) p.gaps.add("accession");
   if (!p.taxon) p.gaps.add("curated");
-  if (p.plantingCount && !p.hasGps) p.gaps.add("gps");
+  p.missing = p.taxon ? curatedMissing(p) : null;
+  p.complete = !!p.taxon && p.missing.length === 0;
   const accNums = p.accessions.map((a) => a.accession_number).join(" ");
   p.haystack = [p.displayName, ...[...p.spellings.values()].flatMap((s) => [...s.names]), p.description,
     p.website[0] ? p.website[0].description : "", accNums, p.taxon ? p.taxon.common_name : ""].join("  ").toLowerCase();
@@ -866,9 +875,9 @@ function renderTopbar() {
 function renderNav() {
   const dupes = getDupes().length;
   const items = [
+    ["dashboard", "Dashboard", null],
     ["browse", "Browse", state.idx.list.length],
     ["duplicates", "Possible duplicates", dupes],
-    ["incomplete", "Incomplete records", null],
     ["locations", "Garden locations", null],
   ];
   if (state.me?.is_admin) items.push(["admin", "Admin", null]);
@@ -880,8 +889,8 @@ function renderNav() {
 function renderMain() {
   const el = document.getElementById("main");
   if (!el) return;
-  const views = { browse: renderBrowse, duplicates: renderDuplicates, incomplete: renderIncomplete, locations: renderLocations, admin: renderAdmin };
-  el.innerHTML = (views[state.view] || renderBrowse)() + `<footer class="foot">RBG Plant Collection Manager · v${APP_VERSION} (${APP_UPDATED})${DEMO ? " · demo mode: changes are not saved" : ""}</footer>`;
+  const views = { browse: renderBrowse, duplicates: renderDuplicates, dashboard: renderDashboard, locations: renderLocations, admin: renderAdmin };
+  el.innerHTML = (views[state.view] || renderDashboard)() + `<footer class="foot">RBG Plant Collection Manager · v${APP_VERSION} (${APP_UPDATED})${DEMO ? " · demo mode: changes are not saved" : ""}</footer>`;
 }
 
 function refreshNavCounts() {
@@ -1097,16 +1106,25 @@ function renderNamesSection(p) {
   </div>`;
 }
 
+// Tick several results (the ticks survive new searches) to merge them all
+// into this plant at once; the per-row buttons still merge just one.
 function renderMergeResults(p) {
   const q = state.mergeQuery.trim().toLowerCase();
-  if (q.length < 2) return "";
+  const picks = [...state.mergePicks].map((k) => state.idx.plants.get(k)).filter((o) => o && o.key !== p.key);
+  const picked = picks.length ? `<div class="box" style="padding:6px 10px;margin-top:6px">
+      <div class="faint">Ticked to merge into “${esc(p.displayName)}”:</div>
+      <div class="pills" style="margin:4px 0">${picks.map((o) => `<span class="pill sky">${esc(o.displayName)}</span>`).join("")}</div>
+      <button class="btn small primary" data-action="merge-picks" data-keep="${attr(p.key)}">Merge ${plural(picks.length, "ticked plant")} into this one</button>
+      <button class="btn small link" data-action="clear-picks">Clear</button></div>` : "";
+  if (q.length < 2) return picked;
   const starts = (o) => (o.displayName.toLowerCase().startsWith(q) ? 0 : 1);
   const results = state.idx.list.filter((o) => o.key !== p.key && o.haystack.includes(q))
     .sort((a, b) => starts(a) - starts(b) || a.displayName.localeCompare(b.displayName)).slice(0, 8);
-  if (!results.length) return `<div class="faint">No other plant matches.</div>`;
+  if (!results.length) return `${picked}<div class="faint">No other plant matches.</div>`;
   const short = (n) => (n.length > 22 ? n.slice(0, 20) + "…" : n);
-  return `<div class="merge-results">${results.map((o) => `<div>
-      <div><strong>${esc(o.displayName)}</strong><div class="faint">${esc(sourceSummary(o))}</div></div>
+  return `${picked}<div class="merge-results">${results.map((o) => `<div>
+      <label style="display:flex;gap:8px;align-items:flex-start;min-width:0"><input type="checkbox" data-merge-pick="${attr(o.key)}" ${state.mergePicks.has(o.key) ? "checked" : ""}>
+        <div><strong>${esc(o.displayName)}</strong><div class="faint">${esc(sourceSummary(o))}</div></div></label>
       <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
         <button class="btn small" data-action="merge" data-keep="${attr(p.key)}" data-alias="${attr(o.key)}">Keep “${esc(short(p.displayName))}”</button>
         <button class="btn small" data-action="merge" data-keep="${attr(o.key)}" data-alias="${attr(p.key)}">Keep “${esc(short(o.displayName))}”</button>
@@ -1167,6 +1185,28 @@ function parseNameParts(name) {
     out.infra_epithet = infra[2];
   }
   return out;
+}
+
+/* ---------- completeness ----------
+   "Complete" = every curated field that applies to this plant (decided
+   2026-09-13). Name parts only apply when the plant's name has them:
+   a wild species has no cultivar, "Agave 'Blue Glow'" has no species.
+   Conservation year and link only apply once a status other than Not
+   Evaluated is set. Everything else is required for every plant. When
+   the ICN/ICNCP name fields land, this is the one place to update. */
+const NAME_PART_FIELDS = ["species", "infra_rank", "infra_epithet", "cultivar", "hybrid_formula"];
+
+function curatedMissing(p) {
+  const t = p.taxon;
+  const parts = parseNameParts(t.display_name || p.displayName);
+  const applies = (f) => {
+    if (f === "infra_rank" || f === "infra_epithet") return !!(parts.infra_rank || t.infra_rank || t.infra_epithet);
+    if (NAME_PART_FIELDS.includes(f)) return !!(parts[f] || !blank(t[f]));
+    if (f === "conservation_assessed_year" || f === "conservation_url") return !!t.conservation_status && t.conservation_status !== "NE";
+    return true;
+  };
+  const filled = (v) => !(v == null || v === "" || (Array.isArray(v) && !v.length));
+  return CURATED_FIELDS.filter((field) => applies(field.f) && !filled(t[field.f])).map((field) => field.label);
 }
 
 const SEASON_BY_MONTH = { 12: "Winter", 1: "Winter", 2: "Winter", 3: "Spring", 4: "Spring", 5: "Spring", 6: "Summer", 7: "Summer", 8: "Summer", 9: "Fall", 10: "Fall", 11: "Fall" };
@@ -1465,15 +1505,20 @@ async function savePlanting(form) {
 }
 
 /* ==================== MERGE ACTIONS ==================== */
-async function mergePlants(aliasKey, keepKey) {
-  const alias = state.idx.plants.get(aliasKey), keep = state.idx.plants.get(keepKey);
-  if (!alias || !keep || aliasKey === keepKey) return;
+// Merges any number of plants into one. All rows go in one INSERT, so the
+// database applies them together or not at all -- if two of them both
+// have curated records, the name_merges trigger refuses the whole batch.
+async function mergePlants(aliasKeys, keepKey) {
+  const keep = state.idx.plants.get(keepKey);
+  const aliases = [...new Set(aliasKeys)].filter((k) => k !== keepKey).map((k) => state.idx.plants.get(k)).filter(Boolean);
+  if (!keep || !aliases.length) return;
   try {
-    await db.insert("name_merges", [{ alias_key: aliasKey, canonical_key: keepKey, alias_name: alias.displayName, canonical_name: keep.displayName }], { returning: false });
+    await db.insert("name_merges", aliases.map((a) => ({ alias_key: a.key, canonical_key: keep.key, alias_name: a.displayName, canonical_name: keep.displayName })), { returning: false });
     await reloadTables("name_merges", "taxa");
-    if (state.selectedKey === aliasKey) state.selectedKey = keepKey;
+    if (aliases.some((a) => a.key === state.selectedKey)) state.selectedKey = keep.key;
     state.mergeQuery = "";
-    toast(`Merged “${alias.displayName}” into “${keep.displayName}”.`);
+    state.mergePicks.clear();
+    toast(aliases.length === 1 ? `Merged “${aliases[0].displayName}” into “${keep.displayName}”.` : `Merged ${aliases.length} names into “${keep.displayName}”.`);
     render();
   } catch (e) {
     toast(`Couldn't merge: ${e.message}`, true);
@@ -1491,17 +1536,20 @@ async function unmerge(aliasKey) {
   } catch (e) { toast(`Couldn't unmerge: ${e.message}`, true); }
 }
 
-async function markNotDuplicates(a, b) {
-  const [x, y] = a < b ? [a, b] : [b, a];
-  try {
-    await db.insert("not_duplicates", [{ key_a: x, key_b: y }], { returning: false });
-  } catch (e) {
-    // The table's CHECK (key_a < key_b) uses the database collation, which
-    // can order punctuation differently from JavaScript. Retry swapped.
-    if (/check constraint|23514/i.test(e.message)) {
-      try { await db.insert("not_duplicates", [{ key_a: y, key_b: x }], { returning: false }); }
-      catch (e2) { toast(`Couldn't save: ${e2.message}`, true); return; }
-    } else { toast(`Couldn't save: ${e.message}`, true); return; }
+// pairs: [[keyA, keyB], ...]
+async function markNotDuplicates(pairs) {
+  for (const [a, b] of pairs) {
+    const [x, y] = a < b ? [a, b] : [b, a];
+    try {
+      await db.insert("not_duplicates", [{ key_a: x, key_b: y }], { returning: false });
+    } catch (e) {
+      // The table's CHECK (key_a < key_b) uses the database collation, which
+      // can order punctuation differently from JavaScript. Retry swapped.
+      if (/check constraint|23514/i.test(e.message)) {
+        try { await db.insert("not_duplicates", [{ key_a: y, key_b: x }], { returning: false }); }
+        catch (e2) { toast(`Couldn't save: ${e2.message}`, true); break; }
+      } else if (!/duplicate key|23505/i.test(e.message)) { toast(`Couldn't save: ${e.message}`, true); break; }
+    }
   }
   await reloadTables("not_duplicates");
   render();
@@ -1513,6 +1561,32 @@ async function markNotDuplicates(a, b) {
    O(n²): exact groupings use maps, and edit distance only compares keys
    sharing their first two letters and within two characters in length.
    ============================================================= */
+/* A variegated, crested or monstrose plant is a different plant from the
+   plain one ("Agave isthmensis" vs "Agave isthmensis (varieg.)") -- Amanda,
+   2026-09-13. The marker appears as a cultivar ('Cristata'), a forma
+   (f. cristatus) or informally ("(variegated)", "crest"). The same stems
+   are also real species epithets in second position -- Aloe variegata,
+   Adromischus cristatus -- so the word right after the genus never counts.
+   Inside parentheses the same rule applies to a synonym ("(stapelia
+   variegata)"), unless the parenthesis starts with a marker ("(crested form)"). */
+const FORM_MARKERS = [["variegated", /variegat|varieg|mediopict|medio-pict|marginat/], ["crested", /crest|cristat/], ["monstrose", /monstros/]];
+
+function formMarkers(key) {
+  const found = new Set();
+  const scan = (words, skipEpithet) => words.forEach((w, i) => {
+    if (i === 0 && skipEpithet) return;
+    if (i === 1 && skipEpithet && /^[a-z\-]+$/.test(w)) return;
+    for (const [name, re] of FORM_MARKERS) if (re.test(w)) found.add(name);
+  });
+  const outside = key.replace(/\([^)]*\)/g, " ").trim().split(/\s+/);
+  scan(outside, true);
+  for (const m of key.matchAll(/\(([^)]*)\)/g)) {
+    const words = m[1].trim().split(/\s+/);
+    scan(words, words.length > 1 && !FORM_MARKERS.some(([, re]) => re.test(words[0])));
+  }
+  return [...found].sort().join(",");
+}
+
 const NOT_EPITHET = new Set(["x", "sp", "sp.", "spp", "spp.", "hybrid", "cv.", "var.", "ssp.", "f.", "species", "form"]);
 
 function boundedLevenshtein(a, b, max) {
@@ -1531,9 +1605,36 @@ function boundedLevenshtein(a, b, max) {
   return prev[b.length];
 }
 
+// Suggested pairs joined into groups: if A~B and B~C, one card shows all
+// three. A long chain of near-spellings can join unrelated names, which
+// is why each member can be ticked off rather than merged wholesale.
 function getDupes() {
-  if (!state.dupes) state.dupes = computeDupes();
+  if (!state.dupes) state.dupes = groupDupes(computeDupes());
   return state.dupes;
+}
+
+function groupDupes(pairs) {
+  const parent = new Map();
+  const find = (k) => { while (parent.get(k) !== k) { parent.set(k, parent.get(parent.get(k))); k = parent.get(k); } return k; };
+  for (const { a, b } of pairs) {
+    if (!parent.has(a)) parent.set(a, a);
+    if (!parent.has(b)) parent.set(b, b);
+    parent.set(find(a), find(b));
+  }
+  const groups = new Map();
+  for (const pr of pairs) {
+    const root = find(pr.a);
+    const g = groups.get(root) || { keys: new Set(), pairs: [], score: 0 };
+    g.keys.add(pr.a); g.keys.add(pr.b); g.pairs.push(pr); g.score = Math.max(g.score, pr.score);
+    groups.set(root, g);
+  }
+  return [...groups.values()].map((g) => {
+    // Suggested name to keep: one with a curated record (merging it away
+    // is refused if another member has one too), then IrisBG, then most sources.
+    const members = [...g.keys].map((k) => state.idx.plants.get(k)).sort((x, y) =>
+      (!!y.taxon - !!x.taxon) || (y.accessions.length > 0) - (x.accessions.length > 0) || (y.sourceCount - x.sourceCount) || x.sortName.localeCompare(y.sortName));
+    return { members, pairs: g.pairs, score: g.score };
+  }).sort((x, y) => (y.score - x.score) || x.members[0].sortName.localeCompare(y.members[0].sortName));
 }
 
 function computeDupes() {
@@ -1541,8 +1642,10 @@ function computeDupes() {
   const keys = new Set(plants.map((p) => p.key));
   const dismissed = new Set(state.data.not_duplicates.map((n) => `${n.key_a}${n.key_b}`));
   const pairs = new Map();
+  const markers = new Map([...keys].map((k) => [k, formMarkers(k)]));
   const add = (a, b, score, reason) => {
     if (a === b || !keys.has(a) || !keys.has(b)) return;
+    if (markers.get(a) !== markers.get(b)) return;
     const [x, y] = a < b ? [a, b] : [b, a];
     if (dismissed.has(`${x}${y}`) || dismissed.has(`${y}${x}`)) return;
     const id = `${x}${y}`;
@@ -1649,39 +1752,73 @@ function sourceSummary(p) {
   return parts.join(" · ") || "no sources";
 }
 
-function renderDupSide(p) {
+function renderDupMember(p, gi, keepKey, reasons) {
   const accs = p.accessions.slice(0, 4).map((a) => a.accession_number).join(", ") + (p.accessions.length > 4 ? "…" : "");
-  return `<div class="side">
+  return `<div class="side member">
+    <label class="tick" title="Include in the merge"><input type="checkbox" data-dup-tick="${gi}" value="${attr(p.key)}" checked></label>
     ${p.photo ? `<img loading="lazy" src="${attr(p.photo)}" alt="">` : `<div class="ph"></div>`}
-    <div style="min-width:0">
+    <div style="min-width:0;flex:1">
       <div class="plant-name" style="font-size:15px"><a href="#" data-action="select" data-key="${attr(p.key)}">${esc(p.displayName)}</a></div>
       <div class="faint">${esc(sourceSummary(p))}${p.taxon ? " · curated" : ""}</div>
       ${accs ? `<div class="faint">Accessions: ${esc(accs)}</div>` : ""}
       <div class="snippet">${esc(p.description || (p.wib[0]?.details?.native_to ? `Native to ${p.wib[0].details.native_to}` : ""))}</div>
+      ${reasons.length ? `<ul class="reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+    </div>
+    <div class="member-actions">
+      <label class="faint"><input type="radio" name="keep-${gi}" value="${attr(p.key)}" ${p.key === keepKey ? "checked" : ""}> Keep this name</label>
+      <button class="btn small" data-action="not-dup-member" data-group="${gi}" data-key="${attr(p.key)}" title="This one isn't the same plant as the others">Not part of this group</button>
     </div></div>`;
 }
 
 function renderDuplicates() {
-  const dupes = getDupes();
-  const shown = dupes.slice(0, state.dupLimit);
+  const groups = getDupes();
+  const shown = groups.slice(0, state.dupLimit);
   return `<h1 class="page-title">Possible duplicates</h1>
-    <p class="muted">${dupes.length.toLocaleString()} suggested pair${dupes.length === 1 ? "" : "s"}, strongest first. Merging never changes a source record — it only tells the app and the Google Sheet to treat the names as one plant, and it can be undone from the plant's Curated tab.</p>
-    ${shown.map((d) => {
-      const a = state.idx.plants.get(d.a), b = state.idx.plants.get(d.b);
+    <p class="muted">${groups.length.toLocaleString()} suggested group${groups.length === 1 ? "" : "s"}, strongest first. Untick any name that isn't the same plant, choose the name to keep, then merge. Merging never changes a source record — it only tells the app and the Google Sheet to treat the names as one plant, and each name can be unmerged from the plant's Curated tab.</p>
+    ${shown.map((g, gi) => {
+      const keepKey = g.members[0].key;
+      const reasonsFor = (k) => g.pairs.filter((pr) => pr.a === k || pr.b === k).flatMap((pr) => {
+        const other = state.idx.plants.get(pr.a === k ? pr.b : pr.a);
+        return pr.reasons.map((r) => `${r} — vs “${other.displayName}”`);
+      });
       return `<div class="pair">
-        <div class="row-between"><span class="pill ${d.score >= 0.85 ? "sage" : d.score >= 0.65 ? "sky" : "gold"}">${d.score >= 0.85 ? "Strong" : d.score >= 0.65 ? "Likely" : "Possible"} match</span></div>
-        <ul class="reasons">${d.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
-        <div class="pair-sides">${renderDupSide(a)}${renderDupSide(b)}</div>
+        <div class="row-between"><span class="pill ${g.score >= 0.85 ? "sage" : g.score >= 0.65 ? "sky" : "gold"}">${g.score >= 0.85 ? "Strong" : g.score >= 0.65 ? "Likely" : "Possible"} match</span>
+          <span class="faint">${plural(g.members.length, "name")}</span></div>
+        ${g.members.length === 2 ? `<ul class="reasons">${g.pairs[0].reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
+        <div class="members">${g.members.map((p) => renderDupMember(p, gi, keepKey, g.members.length > 2 ? reasonsFor(p.key) : [])).join("")}</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-          <button class="btn primary" data-action="merge" data-keep="${attr(a.key)}" data-alias="${attr(b.key)}">Merge — keep left name</button>
-          <button class="btn primary" data-action="merge" data-keep="${attr(b.key)}" data-alias="${attr(a.key)}">Merge — keep right name</button>
-          <button class="btn" data-action="not-dup" data-a="${attr(a.key)}" data-b="${attr(b.key)}">Not duplicates</button>
+          <button class="btn primary" data-action="merge-group" data-group="${gi}">Merge ticked names</button>
+          <button class="btn" data-action="not-dup-group" data-group="${gi}">None of these are duplicates</button>
         </div></div>`;
     }).join("") || `<div class="empty">No suggestions right now.</div>`}
-    ${dupes.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dupes">Show more (${(dupes.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+    ${groups.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dupes">Show more (${(groups.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
 }
 
-/* ==================== INCOMPLETE RECORDS ==================== */
+function mergeGroup(gi) {
+  const ticked = [...document.querySelectorAll(`input[data-dup-tick="${gi}"]:checked`)].map((c) => c.value);
+  const keep = document.querySelector(`input[name="keep-${gi}"]:checked`)?.value;
+  if (!keep || !ticked.includes(keep)) { toast("Tick the name you want to keep.", true); return; }
+  if (ticked.length < 2) { toast("Tick at least two names to merge.", true); return; }
+  mergePlants(ticked, keep);
+}
+
+// "Not part of this group": dismiss every suggested pair linking this plant
+// to the rest, so the group re-forms without it.
+function notDupMember(gi, key) {
+  const g = getDupes()[gi];
+  if (g) markNotDuplicates(g.pairs.filter((pr) => pr.a === key || pr.b === key).map((pr) => [pr.a, pr.b]));
+}
+
+function notDupGroup(gi) {
+  const g = getDupes()[gi];
+  if (g && confirmAction(`Mark all ${g.members.length} names as different plants?`)) markNotDuplicates(g.pairs.map((pr) => [pr.a, pr.b]));
+}
+
+/* ==================== DASHBOARD ====================
+   Replaced "Incomplete records" in v1.1.0. Every number is a test over
+   the derived plant index, so it costs no network and is always current
+   with merges. Clicking a number lists its plants underneath.
+   =================================================== */
 const GAP_FIX = {
   photo: "Add photos to the Tumblr post or Plant Highlight; the bot picks them up on its next run.",
   description: "Write-ups come from Tumblr and Plant Highlights — edit them there.",
@@ -1689,24 +1826,54 @@ const GAP_FIX = {
   wib: "What's in Bloom data comes from the monthly PDFs and the reference sheet.",
   accession: "Accessions come from IrisBG — check the name matches, or merge it with the IrisBG spelling.",
   curated: "Open the plant and fill in its Curated tab.",
-  gps: "Open the plant, then Edit a planting under Accessions to add its GPS point.",
 };
+const hasWibFacts = (r) => ["native_to", "form_size", "sun_shade", "hardy_to"].some((k) => !blank(r.details?.[k]));
 
-function renderIncomplete() {
-  const counts = {};
-  for (const g of Object.keys(GAPS)) counts[g] = 0;
-  for (const p of state.idx.list) for (const g of p.gaps) counts[g]++;
-  const gap = state.incompleteGap;
-  const list = state.idx.list.filter((p) => p.gaps.has(gap)).sort((a, b) => a.displayName.localeCompare(b.displayName));
-  const shown = list.slice(0, state.incompleteLimit);
-  return `<h1 class="page-title">Incomplete records</h1>
-    <div class="stat-grid">${Object.entries(GAPS).map(([g, label]) => `<div class="stat" style="cursor:pointer;${g === gap ? "outline:2px solid var(--forest)" : ""}" data-action="gap" data-gap="${g}"><div class="n">${counts[g].toLocaleString()}</div><div class="l">${esc(label)}</div></div>`).join("")}</div>
-    <div class="notice">${esc(GAP_FIX[gap])}</div>
-    <div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Other gaps</th></tr></thead><tbody>
+const DASH_SECTIONS = [
+  { title: "Facts", tiles: [
+    { id: "total", label: "Plants", test: () => true },
+    { id: "all4", label: "In all 4 sources", test: (p) => p.sourceCount === 4, hint: "Tumblr, Plant Highlight, What's in Bloom and IrisBG." },
+    { id: "complete", label: "Complete curated records", test: (p) => p.complete, hint: "Every curated field that applies to the plant is filled in. Open one to see what's left." },
+    { id: "curated", label: "Curated records started", test: (p) => !!p.taxon },
+    { id: "photo", label: "With a picture", test: (p) => !!p.photo },
+    { id: "tumblr", label: "On Tumblr", test: (p) => p.tumblr.length > 0 },
+    { id: "highlight", label: "With a Plant Highlight", test: (p) => !!p.highlightLink },
+    { id: "wib", label: "In What's in Bloom", test: (p) => p.hasWib },
+    { id: "irisbg", label: "In IrisBG", test: (p) => p.hasIris },
+  ] },
+  { title: "Exceptions", tiles: [
+    { id: "complete-no-highlight", label: "Complete record, no Plant Highlight", test: (p) => p.complete && !p.highlightLink, hint: "Candidates for a new Plant Highlight." },
+    { id: "tumblr-repeat", label: "On Tumblr 2+ times", test: (p) => p.tumblr.length > 1 },
+    { id: "wib-repeat", label: "In What's in Bloom 2+ editions", test: (p) => p.appearances.length > 1 },
+    { id: "wib-no-facts", label: "In a What's in Bloom PDF, no fact values", test: (p) => p.appearances.length > 0 && !p.wib.some(hasWibFacts), hint: "The facts come from the reference sheet only, which doesn't cover these yet." },
+    { id: "gps", label: "Plantings without GPS", test: (p) => p.plantingCount > 0 && !p.hasGps, hint: "Open the plant, then Edit a planting under Accessions to add its GPS point." },
+  ] },
+  { title: "Gaps", tiles: Object.entries(GAPS).map(([g, label]) => ({ id: `gap-${g}`, label, test: (p) => p.gaps.has(g), hint: GAP_FIX[g] })) },
+];
+
+function dashTile(id) {
+  for (const sec of DASH_SECTIONS) for (const t of sec.tiles) if (t.id === id) return t;
+  return DASH_SECTIONS[0].tiles[1];
+}
+
+function renderDashboard() {
+  const plants = state.idx.list;
+  const current = dashTile(state.dashTile);
+  const sections = DASH_SECTIONS.map((sec) => `<h2 class="dash-h">${esc(sec.title)}</h2>
+    <div class="stat-grid">${sec.tiles.map((t) => {
+      const n = t.id === "total" ? plants.length : plants.reduce((c, p) => c + (t.test(p) ? 1 : 0), 0);
+      return `<div class="stat clickable ${t.id === current.id ? "active" : ""}" data-action="dash-tile" data-tile="${t.id}"><div class="n">${n.toLocaleString()}</div><div class="l">${esc(t.label)}</div></div>`;
+    }).join("")}</div>`).join("");
+  const list = plants.filter(current.test).sort((a, b) => a.sortName.localeCompare(b.sortName));
+  const shown = list.slice(0, state.dashLimit);
+  return `<h1 class="page-title">Dashboard</h1>${sections}
+    <h2 class="dash-h" id="dash-list">${esc(current.label)} · ${list.length.toLocaleString()}</h2>
+    ${current.hint ? `<div class="notice">${esc(current.hint)}</div>` : ""}
+    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Gaps</th></tr></thead><tbody>
       ${shown.map((p) => `<tr class="clickable" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td>
-        <td>${[...p.gaps].filter((g) => g !== gap).map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}</td></tr>`).join("")}
-    </tbody></table></div>
-    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-incomplete">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+        <td>${[...p.gaps].map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}${p.taxon && !p.complete ? ` <span class="pill sky" title="${attr(p.missing.join(", "))}">${plural(p.missing.length, "curated field")} to go</span>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">No plants.</div>`}
+    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dash">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
 }
 
 /* ==================== CACHE / SYNC ====================
@@ -2301,8 +2468,14 @@ async function addStaff(form) {
    ================================================ */
 let searchTimer = null;
 
+function refreshMergeResults() {
+  const p = selectedPlant();
+  const box = document.getElementById("merge-results");
+  if (p && box) box.innerHTML = renderMergeResults(p);
+}
+
 function selectPlant(key) {
-  if (state.selectedKey !== key) { state.mergeQuery = ""; state.editingPlanting = null; }
+  if (state.selectedKey !== key) { state.mergeQuery = ""; state.mergePicks.clear(); state.editingPlanting = null; }
   state.selectedKey = key;
   renderPanel();
   document.querySelectorAll(".card.selected, tr.selected").forEach((el) => el.classList.remove("selected"));
@@ -2338,12 +2511,16 @@ document.addEventListener("click", async (ev) => {
     case "use-sugg": useSuggestion(el); break;
     case "delete-taxon": deleteTaxon(); break;
     case "edit-planting": state.editingPlanting = state.editingPlanting === Number(el.dataset.id) ? null : Number(el.dataset.id); renderPanel(); break;
-    case "merge": mergePlants(el.dataset.alias, el.dataset.keep); break;
+    case "merge": mergePlants([el.dataset.alias], el.dataset.keep); break;
+    case "merge-picks": mergePlants([...state.mergePicks], el.dataset.keep); break;
+    case "clear-picks": state.mergePicks.clear(); refreshMergeResults(); break;
+    case "merge-group": mergeGroup(Number(el.dataset.group)); break;
+    case "not-dup-group": notDupGroup(Number(el.dataset.group)); break;
+    case "not-dup-member": notDupMember(Number(el.dataset.group), el.dataset.key); break;
     case "unmerge": unmerge(el.dataset.alias); break;
-    case "not-dup": markNotDuplicates(el.dataset.a, el.dataset.b); break;
     case "more-dupes": state.dupLimit += 25; renderMain(); break;
-    case "gap": state.incompleteGap = el.dataset.gap; state.incompleteLimit = 100; renderMain(); break;
-    case "more-incomplete": state.incompleteLimit += 100; renderMain(); break;
+    case "dash-tile": state.dashTile = el.dataset.tile; state.dashLimit = 100; renderMain(); document.getElementById("dash-list")?.scrollIntoView({ behavior: "smooth", block: "start" }); break;
+    case "more-dash": state.dashLimit += 100; renderMain(); break;
     case "admin-tab": state.adminTab = el.dataset.tab; renderMain(); break;
     case "run-import": runIrisImport(); break;
     case "cancel-import": state.importState = null; renderMain(); break;
@@ -2378,9 +2555,7 @@ document.addEventListener("input", (ev) => {
     }, 180);
   } else if (t.id === "merge-search") {
     state.mergeQuery = t.value;
-    const p = selectedPlant();
-    const box = document.getElementById("merge-results");
-    if (p && box) box.innerHTML = renderMergeResults(p);
+    refreshMergeResults();
   } else if (t.closest && t.closest("#curated-form")) {
     // A hand edit after "Use" makes the value typed-in unless it still
     // matches the suggestion exactly (checked again at save time).
@@ -2395,6 +2570,9 @@ document.addEventListener("change", (ev) => {
     state.browse[t.dataset.filter] = t.value;
     state.browse.limit = state.browse.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE;
     renderMain();
+  } else if (t.dataset.mergePick) {
+    if (t.checked) state.mergePicks.add(t.dataset.mergePick); else state.mergePicks.delete(t.dataset.mergePick);
+    refreshMergeResults();
   } else if (t.id === "iris-file" && t.files && t.files[0]) {
     handleIrisFile(t.files[0]);
   } else if (t.dataset.loc) {
