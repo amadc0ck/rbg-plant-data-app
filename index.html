@@ -235,7 +235,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const APP_UPDATED = "2026-09-13";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -1122,12 +1122,13 @@ function renderMergeResults(p) {
     .sort((a, b) => starts(a) - starts(b) || a.displayName.localeCompare(b.displayName)).slice(0, 8);
   if (!results.length) return `${picked}<div class="faint">No other plant matches.</div>`;
   const short = (n) => (n.length > 22 ? n.slice(0, 20) + "…" : n);
+  const keepLabel = (x, other) => short(x.displayName.toLowerCase() === other.displayName.toLowerCase() ? ([...(x.spellings.get(x.key)?.names || [])][0] || x.displayName) : x.displayName);
   return `${picked}<div class="merge-results">${results.map((o) => `<div>
       <label style="display:flex;gap:8px;align-items:flex-start;min-width:0"><input type="checkbox" data-merge-pick="${attr(o.key)}" ${state.mergePicks.has(o.key) ? "checked" : ""}>
-        <div><strong>${esc(o.displayName)}</strong><div class="faint">${esc(sourceSummary(o))}</div></div></label>
+        <div><strong>${esc(o.displayName)}</strong><div class="faint">${esc([listedAs(o), sourceSummary(o)].filter(Boolean).join(" · "))}</div></div></label>
       <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
-        <button class="btn small" data-action="merge" data-keep="${attr(p.key)}" data-alias="${attr(o.key)}">Keep “${esc(short(p.displayName))}”</button>
-        <button class="btn small" data-action="merge" data-keep="${attr(o.key)}" data-alias="${attr(p.key)}">Keep “${esc(short(o.displayName))}”</button>
+        <button class="btn small" data-action="merge" data-keep="${attr(p.key)}" data-alias="${attr(o.key)}">Keep “${esc(keepLabel(p, o))}”</button>
+        <button class="btn small" data-action="merge" data-keep="${attr(o.key)}" data-alias="${attr(p.key)}">Keep “${esc(keepLabel(o, p))}”</button>
       </div></div>`).join("")}</div>`;
 }
 
@@ -1568,7 +1569,13 @@ async function markNotDuplicates(pairs) {
    are also real species epithets in second position -- Aloe variegata,
    Adromischus cristatus -- so the word right after the genus never counts.
    Inside parentheses the same rule applies to a synonym ("(stapelia
-   variegata)"), unless the parenthesis starts with a marker ("(crested form)"). */
+   variegata)"), unless the parenthesis starts with a marker ("(crested form)").
+   Colour forms are distinct too, keyed by the colours themselves, so "(white
+   form)" still pairs with "(rare white-flowered form)" but not "(salmon-pink
+   form)". Locality forms ("(Addo form)") are deliberately NOT markers: usually
+   the same taxon, with the provenance on the accession -- Amanda wasn't sure,
+   so they stay suggestions to decide one at a time. */
+const COLOUR_WORDS = new Set(["white", "yellow", "orange", "red", "pink", "salmon", "peach", "apricot", "coral", "blue", "purple", "violet", "lavender", "magenta", "crimson", "scarlet", "cream", "bronze", "copper", "silver", "gold", "golden", "green", "black", "maroon"]);
 const FORM_MARKERS = [["variegated", /variegat|varieg|mediopict|medio-pict|marginat/], ["crested", /crest|cristat/], ["monstrose", /monstros/]];
 
 function formMarkers(key) {
@@ -1577,12 +1584,17 @@ function formMarkers(key) {
     if (i === 0 && skipEpithet) return;
     if (i === 1 && skipEpithet && /^[a-z\-]+$/.test(w)) return;
     for (const [name, re] of FORM_MARKERS) if (re.test(w)) found.add(name);
+    for (const part of w.split(/[^a-z]+/)) if (COLOUR_WORDS.has(part)) found.add(part);
   });
   const outside = key.replace(/\([^)]*\)/g, " ").trim().split(/\s+/);
   scan(outside, true);
   for (const m of key.matchAll(/\(([^)]*)\)/g)) {
     const words = m[1].trim().split(/\s+/);
-    scan(words, words.length > 1 && !FORM_MARKERS.some(([, re]) => re.test(words[0])));
+    // Only a synonym-shaped note ("stapelia variegata", "a. candelabrum")
+    // gets the epithet exemption; "(white form)" and "(peach flowers)" don't.
+    const synonymShaped = words.length > 1 && (/^[a-z]\.$/.test(words[0]) ||
+      (!/form|flower|leave|leaf/.test(m[1]) && !FORM_MARKERS.some(([, re]) => re.test(words[0])) && !words[0].split(/[^a-z]+/).some((w) => COLOUR_WORDS.has(w))));
+    scan(words, synonymShaped);
   }
   return [...found].sort().join(",");
 }
@@ -1639,7 +1651,19 @@ function groupDupes(pairs) {
 
 function computeDupes() {
   const plants = state.idx.list;
-  const keys = new Set(plants.map((p) => p.key));
+  // A name joining two plants ("aloe microstigma & gasteria batesiana
+  // hybrid", "aloe x gasteria") is its own plant, never a spelling of a parent.
+  const allGenera = new Set(plants.map((p) => p.key.split(" ")[0]));
+  // Also two binomials glued together by the What's in Bloom PDF reader
+  // ("abutilon palmeri lobelia laxiflora") -- one was merged by mistake.
+  const twoPlants = (k) => {
+    const bare = k.replace(/\([^)]*\)/g, " ");        // "(blue & white form)" is one plant
+    if (bare.includes("/")) return false;               // "notocactus x / parodia x" is a synonym
+    if (/[&+]/.test(bare)) return true;
+    const t = bare.trim().split(/\s+/);
+    return t.some((w, i) => i >= 1 && w !== t[0] && w.length > 3 && allGenera.has(w) && (t[i - 1] === "x" || (i >= 2 && /^[a-z][a-z\-]+$/.test(t[i + 1] || ""))));
+  };
+  const keys = new Set(plants.map((p) => p.key).filter((k) => !twoPlants(k)));
   const dismissed = new Set(state.data.not_duplicates.map((n) => `${n.key_a}${n.key_b}`));
   const pairs = new Map();
   const markers = new Map([...keys].map((k) => [k, formMarkers(k)]));
@@ -1699,7 +1723,8 @@ function computeDupes() {
     for (const a of group) for (const b of group) {
       if (a === b || !b.startsWith(a + " ")) continue;
       const extra = b.slice(a.length + 1);
-      if (/^(var\.|ssp\.|f\.|'|x |\(|hybrid|crest|cristat|monstros|seedling|cv\.|cultivar)/.test(extra)) continue;
+      // An infraspecific rank (var., subsp., f./forma, subvar., subf.) names a different taxon.
+      if (/^(var\.|ssp\.|subsp\.|subvar\.|subf\.|f\.|forma\b|'|x |\(|hybrid|crest|cristat|monstros|seedling|cv\.|cultivar)/.test(extra)) continue;
       if (genera.has(tokens(extra)[0]) && tokens(extra)[0].length > 3) continue;
       add(a, b, 0.55, `Same species; “${b}” adds “${extra}”`);
     }
@@ -1743,6 +1768,15 @@ function computeDupes() {
   return [...pairs.values()].sort((x, y) => (y.score - x.score) || (y.reasons.length - x.reasons.length) || x.a.localeCompare(y.a));
 }
 
+// When a curated display name hides what the sources actually call the
+// plant, say so -- two plants both showing "Abutilon palmeri" got merged
+// the wrong way round because nothing on screen told them apart.
+function listedAs(p) {
+  const s = p.spellings.get(p.key);
+  const name = s && [...s.names][0];
+  return name && name.trim().toLowerCase() !== p.displayName.trim().toLowerCase() ? `listed as “${name}”` : "";
+}
+
 function sourceSummary(p) {
   const parts = [];
   if (p.tumblr.length) parts.push(plural(p.tumblr.length, "Tumblr post"));
@@ -1759,7 +1793,7 @@ function renderDupMember(p, gi, keepKey, reasons) {
     ${p.photo ? `<img loading="lazy" src="${attr(p.photo)}" alt="">` : `<div class="ph"></div>`}
     <div style="min-width:0;flex:1">
       <div class="plant-name" style="font-size:15px"><a href="#" data-action="select" data-key="${attr(p.key)}">${esc(p.displayName)}</a></div>
-      <div class="faint">${esc(sourceSummary(p))}${p.taxon ? " · curated" : ""}</div>
+      <div class="faint">${esc([listedAs(p), sourceSummary(p)].filter(Boolean).join(" · "))}${p.taxon ? " · curated" : ""}</div>
       ${accs ? `<div class="faint">Accessions: ${esc(accs)}</div>` : ""}
       <div class="snippet">${esc(p.description || (p.wib[0]?.details?.native_to ? `Native to ${p.wib[0].details.native_to}` : ""))}</div>
       ${reasons.length ? `<ul class="reasons">${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
