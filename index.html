@@ -242,7 +242,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const APP_UPDATED = "2026-09-16";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -303,9 +303,8 @@ const state = {
   dupLimit: 25,
   dupQuery: "",
   combine: null,          // {keepKey, keys, back} while combining curated records
-  // History report: pulled from the server on demand, never cached locally.
-  report: { from: "", to: "", who: "", area: "", op: "", q: "", plantKeys: null, plantLabel: null, rows: [], loading: false, error: null, done: false, ran: false },
-  plantHistory: null,     // {key, rows, loading, error} for the panel's History tab
+  // Change-history export (Admin). Nothing is held here but the filters.
+  changeExport: { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null },
   dashTile: "all4",       // which dashboard number's plant list is showing
   dashLimit: 100,
   importState: null,      // IrisBG import wizard state
@@ -1023,7 +1022,6 @@ function renderNav() {
     ["browse", "Browse", state.idx.list.length],
     ["duplicates", "Possible duplicates", dupes],
     ["locations", "Garden locations", null],
-    ["report", "History", null],
   ];
   if (state.me?.is_admin) items.push(["admin", "Admin", null]);
   return `<nav class="nav">${items.map(([v, label, n]) =>
@@ -1034,7 +1032,7 @@ function renderNav() {
 function renderMain() {
   const el = document.getElementById("main");
   if (!el) return;
-  const views = { browse: renderBrowse, duplicates: renderDuplicates, dashboard: renderDashboard, combine: renderCombine, report: renderReport, locations: renderLocations, admin: renderAdmin };
+  const views = { browse: renderBrowse, duplicates: renderDuplicates, dashboard: renderDashboard, combine: renderCombine, locations: renderLocations, admin: renderAdmin };
   el.innerHTML = (views[state.view] || renderDashboard)() + `<footer class="foot">RBG Plant Collection Manager · v${APP_VERSION} (${APP_UPDATED})${DEMO ? " · demo mode: changes are not saved" : ""}</footer>`;
 }
 
@@ -1148,9 +1146,8 @@ function renderPanel() {
   const tabs = [
     ["curated", "Curated"], ["tumblr", `Tumblr${p.tumblr.length ? ` (${p.tumblr.length})` : ""}`],
     ["highlight", "Plant Highlight"], ["wib", "What's in Bloom"], ["irisbg", `IrisBG${p.irisbg.length ? ` (${p.irisbg.length})` : ""}`],
-    ["history", "History"],
   ];
-  const bodies = { curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab, history: renderHistoryTab };
+  const bodies = { curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab };
   panel.innerHTML = `<div class="panel-head">
       <div class="row-between" style="align-items:flex-start">
         <div><h2>${esc(p.displayName)}</h2>
@@ -2167,12 +2164,13 @@ function renderDashboard() {
     ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dash">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
 }
 
-/* ==================== HISTORY REPORT ====================
-   public.change_log, written by a database trigger (sql/004). Deliberately
-   NOT part of the synced tables: it only grows, and the free egress budget
-   is shared with the ABG app -- so it is pulled on demand, one page at a
-   time, with the filters applied server-side by PostgREST.
-   ======================================================== */
+/* ==================== CHANGE HISTORY EXPORT ====================
+   public.change_log, written by a database trigger (sql/004). It is never
+   listed on screen and never synced into the local cache: it only grows,
+   and the free egress budget is shared with the ABG app. Admin asks how
+   many rows match, then downloads them as CSV -- rows cross the wire only
+   when someone actually exports.
+   ================================================================ */
 const CHANGE_AREAS = [
   ["curated", "Curated records", ["taxa"]],
   ["merges", "Merges & duplicates", ["name_merges", "not_duplicates"]],
@@ -2184,80 +2182,8 @@ const CHANGE_TABLE_LABELS = {
   plantings: "Planting", garden_locations: "Location", irisbg_imports: "IrisBG import", staff: "Staff", list_options: "Picklist",
 };
 const CHANGE_OPS = [["insert", "Created"], ["update", "Edited"], ["delete", "Deleted"]];
-const REPORT_PAGE = 200;
-
-// A date input gives a calendar day; the log stores an instant. Midnight
-// LOCAL is the boundary a person means -- toISOString() on the bare date
-// would start the day at 5pm the evening before, Pacific time.
-function dayStartIso(day, addDays = 0) {
-  const d = new Date(`${day}T00:00:00`);
-  if (isNaN(d)) return null;
-  d.setDate(d.getDate() + addDays);
-  return d.toISOString();
-}
-
-function reportParams(r, offset) {
-  const params = ["select=*", "order=changed_at.desc", `limit=${REPORT_PAGE}`, `offset=${offset}`];
-  if (r.plantKeys && r.plantKeys.length) params.push(`name_key=in.(${r.plantKeys.map((k) => `"${k.replace(/"/g, '""')}"`).join(",")})`);
-  const from = r.from && dayStartIso(r.from);
-  const to = r.to && dayStartIso(r.to, 1);          // inclusive of the end day
-  if (from) params.push(`changed_at=gte.${from}`);
-  if (to) params.push(`changed_at=lt.${to}`);
-  if (r.who) params.push(`changed_by=eq.${encodeURIComponent(r.who)}`);
-  if (r.op) params.push(`op=eq.${r.op}`);
-  const area = CHANGE_AREAS.find(([id]) => id === r.area);
-  if (area) params.push(`table_name=in.(${area[2].join(",")})`);
-  if (r.q.trim()) {
-    const like = `*${r.q.trim().replace(/[(),*]/g, " ")}*`;
-    params.push(`or=(row_key.ilike.${like},name_key.ilike.${like})`);
-  }
-  return params.join("&");
-}
-
-async function fetchChangeLog(r, offset) {
-  if (DEMO) return [];
-  const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/change_log?${reportParams(r, offset)}`);
-  if (!res.ok) throw await pgError(res);
-  return res.json();
-}
-
-async function runReport(more = false) {
-  const r = state.report;
-  if (r.loading) return;
-  r.loading = true;
-  r.error = null;
-  if (!more) { r.rows = []; r.done = false; }
-  renderMain();
-  try {
-    const rows = await fetchChangeLog(r, more ? r.rows.length : 0);
-    r.rows = more ? [...r.rows, ...rows] : rows;
-    r.done = rows.length < REPORT_PAGE;
-    r.ran = true;
-  } catch (e) {
-    r.error = e.message;
-  }
-  r.loading = false;
-  renderMain();
-}
-
-function setReportPlant(keys, label) {
-  state.report = { ...state.report, plantKeys: keys, plantLabel: label || null, rows: [], done: false, ran: false };
-  state.view = "report";
-  render();
-  runReport();
-}
-
-function changeValue(v) {
-  if (v == null) return "—";
-  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
-  if (typeof v === "object") {
-    const keys = Object.keys(v);
-    return keys.length ? `${keys.length} field${keys.length === 1 ? "" : "s"}: ${keys.join(", ")}` : "—";
-  }
-  if (typeof v === "boolean") return v ? "Yes" : "No";
-  const str = String(v);
-  return str.length > 140 ? str.slice(0, 137) + "…" : str;
-}
+const EXPORT_PAGE = 1000;
+const EXPORT_MAX = 50000;   // a safety rail, not a real limit: 50k rows is ~10 MB of CSV
 
 // Column names a curated field label doesn't cover. Anything not here falls
 // back to the column name with underscores as spaces.
@@ -2272,95 +2198,155 @@ const CHANGE_FIELD_LABELS = {
   summary: "Import summary", parent_code: "Parent location", sort: "Sort order", list: "Picklist",
 };
 
+// A date input gives a calendar day; the log stores an instant. Midnight
+// LOCAL is the boundary a person means -- toISOString() on the bare date
+// would start the day at 5pm the evening before, Pacific time.
+function dayStartIso(day, addDays = 0) {
+  const d = new Date(`${day}T00:00:00`);
+  if (isNaN(d)) return null;
+  d.setDate(d.getDate() + addDays);
+  return d.toISOString();
+}
+
+function exportFilters(r) {
+  const parts = [];
+  const from = r.from && dayStartIso(r.from);
+  const to = r.to && dayStartIso(r.to, 1);          // inclusive of the end day
+  if (from) parts.push(`changed_at=gte.${from}`);
+  if (to) parts.push(`changed_at=lt.${to}`);
+  if (r.who) parts.push(`changed_by=eq.${encodeURIComponent(r.who)}`);
+  if (r.op) parts.push(`op=eq.${r.op}`);
+  const area = CHANGE_AREAS.find(([id]) => id === r.area);
+  if (area) parts.push(`table_name=in.(${area[2].join(",")})`);
+  if (r.q.trim()) {
+    // Strip what PostgREST's or=() grammar treats as syntax.
+    const like = `*${r.q.trim().replace(/[(),*"]/g, " ")}*`;
+    parts.push(`or=(row_key.ilike.${like},name_key.ilike.${like})`);
+  }
+  return parts;
+}
+
+// Count only: PostgREST returns it in Content-Range with no rows attached,
+// so answering "how much is there" costs nothing but the request.
+async function countChanges(r) {
+  if (DEMO) return 0;
+  const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/change_log?select=id&limit=1&${exportFilters(r).join("&")}`,
+    { headers: { Prefer: "count=exact" } });
+  if (!res.ok) throw await pgError(res);
+  await res.text();
+  const range = res.headers.get("content-range") || "";
+  return Number(range.split("/")[1] || 0);
+}
+
+async function fetchChangePage(r, offset) {
+  const params = ["select=*", "order=changed_at.desc", `limit=${EXPORT_PAGE}`, `offset=${offset}`, ...exportFilters(r)];
+  const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/change_log?${params.join("&")}`);
+  if (!res.ok) throw await pgError(res);
+  return res.json();
+}
+
+function changeValue(v) {
+  if (v == null) return "";
+  if (Array.isArray(v)) return v.join(", ");
+  if (typeof v === "object") return JSON.stringify(v);
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  return String(v);
+}
+
 function changeLines(row) {
   return Object.entries(row.changes || {}).map(([field, d]) => {
     const label = CHANGE_FIELD_LABELS[field] || (CURATED_FIELDS.find((f) => f.f === field) || {}).label || field.replace(/_/g, " ");
-    if (row.op === "insert") return `${label}: ${changeValue(d.to)}`;
-    if (row.op === "delete") return `${label}: was ${changeValue(d.from)}`;
-    return `${label}: ${changeValue(d.from)} → ${changeValue(d.to)}`;
+    if (row.op === "insert") return `${label}: ${changeValue(d.to) || "—"}`;
+    if (row.op === "delete") return `${label}: was ${changeValue(d.from) || "—"}`;
+    return `${label}: ${changeValue(d.from) || "—"} → ${changeValue(d.to) || "—"}`;
   });
 }
 
-function reportCsv() {
+// One row per changed FIELD, not per change: that is what a spreadsheet can
+// filter and pivot. The log row's own id ties the fields of one edit together.
+function changeCsv(rows) {
   const cell = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-  const lines = [["When", "Who", "What", "Record", "Plant", "Change"].map(cell).join(",")];
-  for (const row of state.report.rows) {
-    const what = `${CHANGE_TABLE_LABELS[row.table_name] || row.table_name} ${(CHANGE_OPS.find(([o]) => o === row.op) || [])[1] || row.op}`;
-    lines.push([row.changed_at, row.changed_by, what, row.row_key, row.name_key, changeLines(row).join("; ")].map(cell).join(","));
+  const lines = [["Change id", "When", "Who", "Area", "Action", "Record", "Plant", "Field", "From", "To"].map(cell).join(",")];
+  for (const row of rows) {
+    const area = CHANGE_TABLE_LABELS[row.table_name] || row.table_name;
+    const action = (CHANGE_OPS.find(([o]) => o === row.op) || [])[1] || row.op;
+    const fields = Object.entries(row.changes || {});
+    const base = [row.id, row.changed_at, row.changed_by === "system" ? "bot / SQL" : row.changed_by, area, action, row.row_key, row.name_key];
+    if (!fields.length) lines.push([...base, "", "", ""].map(cell).join(","));
+    for (const [field, d] of fields) {
+      const label = CHANGE_FIELD_LABELS[field] || (CURATED_FIELDS.find((f) => f.f === field) || {}).label || field.replace(/_/g, " ");
+      lines.push([...base, label, changeValue(d.from), changeValue(d.to)].map(cell).join(","));
+    }
   }
-  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  return "﻿" + lines.join("\r\n");
+}
+
+function downloadCsv(name, text) {
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `rbg-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function renderChangeRows(rows, { plantColumn = true } = {}) {
-  return `<div class="table-wrap"><table class="sheet"><thead><tr><th>When</th><th>Who</th><th>What</th>${plantColumn ? "<th>Plant</th>" : ""}<th>Change</th></tr></thead><tbody>
-    ${rows.map((row) => {
-      const plant = row.name_key ? state.idx.plants.get(resolveKey(row.name_key)) : null;
-      const lines = changeLines(row);
-      return `<tr><td style="white-space:nowrap">${esc(fmtDateTime(row.changed_at))}</td>
-        <td>${esc(row.changed_by === "system" ? "bot / SQL" : shortEmail(row.changed_by))}</td>
-        <td><span class="pill ${row.op === "delete" ? "gold" : row.op === "insert" ? "sage" : "sky"}">${esc((CHANGE_OPS.find(([o]) => o === row.op) || [])[1] || row.op)}</span>
-          ${esc(CHANGE_TABLE_LABELS[row.table_name] || row.table_name)}<div class="faint">${esc(row.row_key || "")}</div></td>
-        ${plantColumn ? `<td>${plant ? `<a href="#" data-action="select" data-key="${attr(plant.key)}">${esc(plant.displayName)}</a>` : esc(row.name_key || "—")}</td>` : ""}
-        <td>${lines.length ? lines.map((l) => `<div>${esc(l)}</div>`).join("") : `<span class="faint">—</span>`}</td></tr>`;
-    }).join("")}
-  </tbody></table></div>`;
-}
-
-function renderReport() {
-  const r = state.report;
-  const whoSeen = [...new Set(r.rows.map((x) => x.changed_by))].sort();
-  const whoOptions = [...new Set([...whoSeen, ...state.data.staff.map((x) => x.email), "system"])].sort();
-  return `<h1 class="page-title">History</h1>
-    <p class="muted">Every change a person or the bot made to curated records, merges, accessions, plantings, locations, staff and picklists. Source records from Tumblr, Plant Highlights and What's in Bloom are not logged. History starts 16 September 2026${DEMO ? " · demo mode has no history" : ""}.</p>
-    <div class="toolbar">
-      <label class="faint">From <input class="input" type="date" data-report="from" value="${attr(r.from)}"></label>
-      <label class="faint">To <input class="input" type="date" data-report="to" value="${attr(r.to)}"></label>
-      <select data-report="area">${optionList(CHANGE_AREAS.map(([id, label]) => [id, label]), r.area, "All areas")}</select>
-      <select data-report="op">${optionList(CHANGE_OPS, r.op, "Created, edited or deleted")}</select>
-      <select data-report="who">${optionList(whoOptions.map((w) => [w, w === "system" ? "bot / SQL" : w]), r.who, "Anyone")}</select>
-      <input class="input" id="report-q" type="search" placeholder="Record or plant name contains…" value="${attr(r.q)}" style="max-width:240px">
-      <button class="btn primary" data-action="run-report">${r.loading ? "Loading…" : "Run report"}</button>
-      <button class="btn link" data-action="reset-report">Reset</button>
-    </div>
-    ${r.plantKeys ? `<div class="notice">Scoped to <strong>${esc(r.plantLabel || r.plantKeys[0])}</strong>. <button class="btn small" data-action="clear-report-plant">Show all plants</button></div>` : ""}
-    ${r.error ? `<div class="notice bad">${esc(r.error)}</div>` : ""}
-    <div class="row-between" style="margin-bottom:10px">
-      <span class="muted">${r.ran ? `${r.rows.length.toLocaleString()} change${r.rows.length === 1 ? "" : "s"}${r.done ? "" : " so far"}` : "Set the filters you want, then run the report."}</span>
-      ${r.rows.length ? `<button class="btn small" data-action="export-report">Download CSV</button>` : ""}
-    </div>
-    ${r.rows.length ? renderChangeRows(r.rows) : r.ran && !r.loading ? `<div class="empty">No changes match these filters.</div>` : ""}
-    ${r.rows.length && !r.done ? `<div class="more"><button class="btn" data-action="more-report">${r.loading ? "Loading…" : "Load more"}</button></div>` : ""}`;
-}
-
-/* ---------- one plant's history, in the detail panel ---------- */
-async function loadPlantHistory(p) {
-  const keys = [...p.spellings.keys(), p.key];
-  state.plantHistory = { key: p.key, rows: [], loading: true, error: null };
-  renderPanel();
+async function countChangeExport() {
+  const r = state.changeExport;
+  r.busy = true; r.error = null; r.count = null; renderMain();
   try {
-    const rows = await fetchChangeLog({ plantKeys: [...new Set(keys)], from: "", to: "", who: "", op: "", q: "", area: "" }, 0);
-    state.plantHistory = { key: p.key, rows, loading: false, error: null };
-  } catch (e) {
-    state.plantHistory = { key: p.key, rows: [], loading: false, error: e.message };
-  }
-  renderPanel();
+    r.count = await countChanges(r);
+  } catch (e) { r.error = e.message; }
+  r.busy = false; renderMain();
 }
 
-function renderHistoryTab(p) {
-  const h = state.plantHistory;
-  if (!h || h.key !== p.key) { loadPlantHistory(p); return `<div class="empty">Loading history…</div>`; }
-  if (h.loading) return `<div class="empty">Loading history…</div>`;
-  if (h.error) return `<div class="notice bad">${esc(h.error)}</div>`;
-  return `<div class="row-between" style="margin-bottom:8px"><span class="faint">${h.rows.length ? plural(h.rows.length, "change") : "No changes recorded yet"}</span>
-      <button class="btn small" data-action="plant-in-report" data-key="${attr(p.key)}">Open in History report</button></div>
-    ${h.rows.length ? renderChangeRows(h.rows, { plantColumn: false }) : `<div class="faint">Edits to this plant's curated record, accessions, plantings and merges will appear here. The log started on 16 September 2026.</div>`}`;
+async function runChangeExport() {
+  const r = state.changeExport;
+  if (r.busy) return;
+  r.busy = true; r.error = null; r.status = "Fetching changes…"; renderMain();
+  try {
+    if (DEMO) throw new Error("Demo mode has no history to export.");
+    const rows = [];
+    for (let offset = 0; offset < EXPORT_MAX; offset += EXPORT_PAGE) {
+      const page = await fetchChangePage(r, offset);
+      rows.push(...page);
+      r.status = `Fetched ${rows.length.toLocaleString()} change${rows.length === 1 ? "" : "s"}…`;
+      renderMain();
+      if (page.length < EXPORT_PAGE) break;
+    }
+    if (!rows.length) throw new Error("No changes match those filters.");
+    const stamp = new Date().toLocaleDateString("en-CA");   // local YYYY-MM-DD
+    downloadCsv(`rbg-change-history-${stamp}.csv`, changeCsv(rows));
+    r.count = rows.length;
+    r.status = `Downloaded ${rows.length.toLocaleString()} change${rows.length === 1 ? "" : "s"}.`;
+  } catch (e) {
+    r.error = e.message;
+    r.status = null;
+  }
+  r.busy = false;
+  renderMain();
+}
+
+function renderChangeExport() {
+  const r = state.changeExport;
+  const whoOptions = [...new Set([...state.data.staff.map((x) => x.email), "system"])].sort();
+  return `<p class="muted">Download who changed what as a spreadsheet: one row per field changed, with the old and new value. Curated records, merges, accessions, plantings, locations, staff and picklists are covered. Source records from Tumblr, Plant Highlights and What's in Bloom are not logged, and history starts 16 September 2026.</p>
+    <div class="toolbar">
+      <label class="faint">From <input class="input" type="date" data-change-export="from" value="${attr(r.from)}"></label>
+      <label class="faint">To <input class="input" type="date" data-change-export="to" value="${attr(r.to)}"></label>
+      <select data-change-export="area">${optionList(CHANGE_AREAS.map(([id, label]) => [id, label]), r.area, "All areas")}</select>
+      <select data-change-export="op">${optionList(CHANGE_OPS, r.op, "Created, edited or deleted")}</select>
+      <select data-change-export="who">${optionList(whoOptions.map((w) => [w, w === "system" ? "bot / SQL" : w]), r.who, "Anyone")}</select>
+      <input class="input" id="change-export-q" type="search" placeholder="Record or plant name contains…" value="${attr(r.q)}" style="max-width:240px">
+      <button class="btn link" data-action="reset-change-export">Reset</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:4px">
+      <button class="btn" data-action="count-changes" ${r.busy ? "disabled" : ""}>How many match?</button>
+      <button class="btn primary" data-action="export-changes" ${r.busy ? "disabled" : ""}>Download CSV</button>
+      <span class="faint">${esc(r.busy ? (r.status || "Working…") : r.count != null ? `${r.count.toLocaleString()} change${r.count === 1 ? "" : "s"} match these filters.` : r.status || "")}</span>
+    </div>
+    ${r.error ? `<div class="notice bad" style="margin-top:10px">${esc(r.error)}</div>` : ""}`;
 }
 
 /* ==================== CACHE / SYNC ====================
@@ -2841,8 +2827,8 @@ const LIST_COLUMN = { plant_type: "plant_type", light_needs: "light_needs", wate
 
 function renderAdmin() {
   if (!state.me?.is_admin) return `<div class="empty">Admins only.</div>`;
-  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["picklists", "Picklists"], ["staff", "Staff"]];
-  const body = { import: renderImportScreen, history: renderImportHistory, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
+  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["changes", "Change history"], ["picklists", "Picklists"], ["staff", "Staff"]];
+  const body = { import: renderImportScreen, history: renderImportHistory, changes: renderChangeExport, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
   return `<h1 class="page-title">Admin</h1>
     <div class="seg" style="margin:6px 0 16px">${tabs.map(([t, l]) => `<button class="${state.adminTab === t ? "active" : ""}" data-action="admin-tab" data-tab="${t}">${l}</button>`).join("")}</div>${body()}`;
 }
@@ -3031,16 +3017,9 @@ document.addEventListener("click", async (ev) => {
     case "not-dup-member": notDupMember(Number(el.dataset.group), el.dataset.key); break;
     case "unmerge": unmerge(el.dataset.alias); break;
     case "more-dupes": state.dupLimit += 25; renderMain(); break;
-    case "run-report": runReport(); break;
-    case "more-report": runReport(true); break;
-    case "export-report": reportCsv(); break;
-    case "reset-report": state.report = { ...state.report, from: "", to: "", who: "", area: "", op: "", q: "", plantKeys: null, plantLabel: null, rows: [], ran: false, done: false }; renderMain(); break;
-    case "clear-report-plant": state.report.plantKeys = null; state.report.plantLabel = null; runReport(); break;
-    case "plant-in-report": {
-      const p = state.idx.plants.get(resolveKey(el.dataset.key));
-      if (p) setReportPlant([...new Set([...p.spellings.keys(), p.key])], p.displayName);
-      break;
-    }
+    case "count-changes": countChangeExport(); break;
+    case "export-changes": runChangeExport(); break;
+    case "reset-change-export": state.changeExport = { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null }; renderMain(); break;
     case "dash-tile": state.dashTile = el.dataset.tile; state.dashLimit = 100; renderMain(); document.getElementById("dash-list")?.scrollIntoView({ behavior: "smooth", block: "start" }); break;
     case "more-dash": state.dashLimit += 100; renderMain(); break;
     case "admin-tab": state.adminTab = el.dataset.tab; renderMain(); break;
@@ -3075,8 +3054,9 @@ document.addEventListener("input", (ev) => {
       if (state.view !== "browse") { state.view = "browse"; render(); document.getElementById("search")?.focus(); }
       else renderMain();
     }, 180);
-  } else if (t.id === "report-q") {
-    state.report.q = t.value;
+  } else if (t.id === "change-export-q") {
+    state.changeExport.q = t.value;
+    state.changeExport.count = null;
   } else if (t.id === "dup-search") {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
@@ -3101,9 +3081,11 @@ document.addEventListener("input", (ev) => {
 
 document.addEventListener("change", (ev) => {
   const t = ev.target;
-  if (t.dataset.report) {
-    state.report[t.dataset.report] = t.value;
-    runReport();
+  if (t.dataset.changeExport) {
+    state.changeExport[t.dataset.changeExport] = t.value;
+    state.changeExport.count = null;
+    state.changeExport.status = null;
+    renderMain();
   } else if (t.dataset.filter) {
     state.browse[t.dataset.filter] = t.value;
     state.browse.limit = state.browse.mode === "gallery" ? GALLERY_PAGE : SHEET_PAGE;
