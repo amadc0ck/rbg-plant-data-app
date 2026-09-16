@@ -198,6 +198,8 @@ table.combine label { display: block; cursor: pointer; }
 .lightbox { position: fixed; inset: 0; background: rgba(31, 42, 36, 0.88); z-index: 90; display: flex; align-items: center; justify-content: center; cursor: zoom-out; padding: 20px; }
 .lightbox img { max-width: 100%; max-height: 100%; border-radius: 6px; }
 .center-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--forest); }
+.or { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--ink-soft); font-size: 12px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .login-card { background: var(--paper); border-radius: 16px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: var(--shadow); }
 .login-card h1 { font-family: var(--serif); margin: 10px 0 6px; }
 .gbtn { display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 10px 18px; font-weight: 600; cursor: pointer; margin-top: 16px; }
@@ -240,8 +242,8 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.3.0";
-const APP_UPDATED = "2026-09-13";
+const APP_VERSION = "1.4.0";
+const APP_UPDATED = "2026-09-16";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
@@ -287,7 +289,9 @@ const TABLE_ORDER = {
 const state = {
   session: null,          // {access_token, refresh_token, expires_at, email}
   me: null,               // own staff row, or null when not on the list
-  phase: "boot",          // boot | login | notstaff | loading | ready | error
+  phase: "boot",          // boot | login | setpassword | notstaff | loading | ready | error
+  notice: null,           // one-off message on the login screen
+  pendingPassword: false, // arrived on an invite or password-reset link
   error: null,
   data: Object.fromEntries(TABLES.map((t) => [t, []])),
   idx: null,              // derived plant index, rebuilt by buildIndex()
@@ -383,6 +387,9 @@ function consumeAuthRedirect() {
   const claims = decodeJwt(token);
   const expiresIn = Number(hash.get("expires_in") || 3600);
   return {
+    // invite and recovery links land here too; both mean "let them set a
+    // password before anything else".
+    type: hash.get("type") || query.get("type") || null,
     session: {
       access_token: token,
       refresh_token: hash.get("refresh_token"),
@@ -392,9 +399,109 @@ function consumeAuthRedirect() {
   };
 }
 
-function signInWithGoogle() {
-  const redirect = location.origin + location.pathname;
-  location.href = `${CONFIG.SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirect)}`;
+function appUrl() { return location.origin + location.pathname; }
+
+// provider is a Supabase provider name: "google" today, "azure" once RBG's
+// Microsoft tenant registration exists (nothing else here has to change).
+function signInWithProvider(provider) {
+  location.href = `${CONFIG.SUPABASE_URL}/auth/v1/authorize?provider=${encodeURIComponent(provider)}&redirect_to=${encodeURIComponent(appUrl())}`;
+}
+
+function sessionFromTokens(data) {
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: Date.now() + (Number(data.expires_in) || 3600) * 1000,
+    email: String(data.user?.email || "").toLowerCase(),
+  };
+}
+
+// Email + password, for staff who have no Google account. Accounts are made
+// by invitation only (public sign-up is off), so there is no sign-up form:
+// an admin adds the person under Admin -> Staff and sends them an invite.
+async function signInWithPassword(form) {
+  const f = new FormData(form);
+  const email = String(f.get("email") || "").trim().toLowerCase();
+  const password = String(f.get("password") || "");
+  const btn = form.querySelector("button[type=submit]");
+  if (!email || !password) { state.error = "Enter your email and password."; render(); return; }
+  if (btn) { btn.disabled = true; btn.textContent = "Signing in…"; }
+  try {
+    const res = await fetch(`${CONFIG.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { apikey: CONFIG.PUBLISHABLE_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) throw new Error(authMessage(res.status, data));
+    state.session = sessionFromTokens(data);
+    saveSession(state.session);
+    state.error = null;
+    state.phase = "boot";
+    render();
+    await boot();
+  } catch (e) {
+    state.error = e.message;
+    state.phase = "login";
+    render();
+  }
+}
+
+// GoTrue's own wording is terse ("Invalid login credentials") or leaks
+// implementation ("Email not confirmed"); say what to do instead.
+function authMessage(status, data) {
+  const msg = String(data.error_description || data.msg || data.message || "").toLowerCase();
+  if (/email not confirmed/.test(msg)) return "This account hasn't been set up yet — use the link in your invitation email, or ask an admin to resend it.";
+  if (/invalid login credentials/.test(msg)) return "That email and password don't match. If you've never set a password, use “Forgot your password?” below.";
+  if (/signups not allowed|signup is disabled/.test(msg)) return "Accounts are created by invitation — ask an admin to add you.";
+  if (status === 429) return "Too many attempts. Wait a few minutes and try again.";
+  return data.error_description || data.msg || data.message || `Sign-in failed (HTTP ${status}).`;
+}
+
+async function requestPasswordReset() {
+  const email = String(document.querySelector("#login-form [name=email]")?.value || "").trim().toLowerCase();
+  if (!email) { state.error = "Type your email address first, then click again."; render(); return; }
+  try {
+    const res = await fetch(`${CONFIG.SUPABASE_URL}/auth/v1/recover?redirect_to=${encodeURIComponent(appUrl())}`, {
+      method: "POST",
+      headers: { apikey: CONFIG.PUBLISHABLE_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    // A 200 here means "we tried" -- GoTrue deliberately doesn't reveal
+    // whether the address exists.
+    if (!res.ok) throw new Error(authMessage(res.status, await res.json().catch(() => ({}))));
+    state.notice = `If ${email} has an account, a reset link is on its way. It can take a few minutes.`;
+    state.error = null;
+  } catch (e) {
+    state.error = e.message;
+  }
+  render();
+}
+
+// After an invite or reset link: the tokens are already in hand, so this
+// just sets the password and carries on into the app.
+async function setPassword(form) {
+  const f = new FormData(form);
+  const pw = String(f.get("password") || "");
+  const again = String(f.get("password2") || "");
+  const status = document.getElementById("pw-status");
+  if (pw.length < 8) { if (status) status.textContent = "Use at least 8 characters."; return; }
+  if (pw !== again) { if (status) status.textContent = "The two passwords don't match."; return; }
+  if (status) status.textContent = "Saving…";
+  try {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/auth/v1/user`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.msg || data.error_description || data.message || "Couldn't set the password.");
+    state.pendingPassword = false;
+    state.notice = null;
+    toast("Password set. You're signed in.");
+    await boot();
+  } catch (e) {
+    if (status) status.textContent = "";
+    toast(e.message, true);
+  }
 }
 
 async function signOut() {
@@ -404,6 +511,7 @@ async function signOut() {
   idbClear();
   state.session = null;
   state.me = null;
+  state.pendingPassword = false;
   state.phase = "login";
   render();
   if (s) {
@@ -847,16 +955,42 @@ function render() {
   if (state.phase === "login") {
     app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}
       <h1>RBG Plant Collection Manager</h1>
-      <p class="muted">Ruth Bancroft Garden staff sign in with Google.</p>
+      <p class="muted">Ruth Bancroft Garden staff sign-in.</p>
       ${state.error ? `<div class="notice bad">${esc(state.error)}</div>` : ""}
-      <button class="gbtn" data-action="sign-in">${GOOGLE_SVG} Sign in with Google</button>
-      <p class="faint" style="margin-top:18px">v${APP_VERSION}</p></div></div>`;
+      ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
+      <button class="gbtn" data-action="sign-in" data-provider="google">${GOOGLE_SVG} Sign in with Google</button>
+      <div class="or"><span>or</span></div>
+      <form id="login-form" autocomplete="on" style="text-align:left">
+        <label class="lbl" for="login-email">Email</label>
+        <input class="input" id="login-email" name="email" type="email" autocomplete="username" placeholder="you@ruthbancroftgarden.org" required>
+        <label class="lbl" for="login-pw" style="margin-top:8px">Password</label>
+        <input class="input" id="login-pw" name="password" type="password" autocomplete="current-password" required>
+        <button class="btn primary" type="submit" style="width:100%;margin-top:12px">Sign in</button>
+      </form>
+      <button class="btn link" data-action="forgot-password" style="margin-top:8px">Forgot your password?</button>
+      <p class="faint" style="margin-top:14px">Accounts are created by invitation. If you're new, ask an admin to add you and send an invite.</p>
+      <p class="faint" style="margin-top:10px">v${APP_VERSION}</p></div></div>`;
+    return;
+  }
+  if (state.phase === "setpassword") {
+    app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}
+      <h1>Set your password</h1>
+      <p class="muted">${esc(state.session?.email || "")} — pick a password for signing in from now on. At least 8 characters.</p>
+      <form id="password-form" autocomplete="on" style="text-align:left">
+        <label class="lbl" for="new-pw">New password</label>
+        <input class="input" id="new-pw" name="password" type="password" autocomplete="new-password" required>
+        <label class="lbl" for="new-pw2" style="margin-top:8px">Again</label>
+        <input class="input" id="new-pw2" name="password2" type="password" autocomplete="new-password" required>
+        <button class="btn primary" type="submit" style="width:100%;margin-top:12px">Save password</button>
+        <div class="faint" id="pw-status" style="margin-top:8px"></div>
+      </form></div></div>`;
     return;
   }
   if (state.phase === "notstaff") {
     app.innerHTML = `<div class="center-screen"><div class="login-card">${LOGO_SVG}
       <h1>Not on the staff list</h1>
       <p>Your account (<strong>${esc(state.session?.email)}</strong>) isn't on the staff list — ask an admin to add you.</p>
+      ${state.pendingPassword ? `<p class="faint">Your password was saved, so you'll be able to sign in as soon as you're added.</p>` : ""}
       <button class="btn" data-action="sign-out">Sign out</button></div></div>`;
     return;
   }
@@ -2590,12 +2724,13 @@ async function deleteOption(list, value) {
 
 function renderStaff() {
   const list = [...state.data.staff].sort((a, b) => a.email.localeCompare(b.email));
-  return `<p class="muted">People on this list can sign in with the Google account for that email address.</p>
+  return `<p class="muted">People on this list can sign in — with Google, or with a password once they've accepted an invitation. Adding someone here doesn't email them; use Invite.</p>
     <div class="table-wrap"><table class="sheet"><thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Added</th><th></th></tr></thead><tbody>
     ${list.map((s) => `<tr><td>${esc(s.email)}</td><td>${esc(s.display_name || "")}</td>
       <td><input type="checkbox" data-action="toggle-admin" data-email="${attr(s.email)}" ${s.is_admin ? "checked" : ""} ${s.email === state.me.email ? "disabled title='You can’t change your own admin role'" : ""}></td>
       <td class="faint">${esc(fmtDate(s.added_at))}${s.added_by ? ` by ${esc(shortEmail(s.added_by))}` : ""}</td>
-      <td>${s.email === state.me.email ? "" : `<button class="btn small danger" data-action="remove-staff" data-email="${attr(s.email)}">Remove</button>`}</td></tr>`).join("")}
+      <td style="white-space:nowrap"><button class="btn small" data-action="invite-staff" data-email="${attr(s.email)}">Invite</button>
+        ${s.email === state.me.email ? "" : ` <button class="btn small danger" data-action="remove-staff" data-email="${attr(s.email)}">Remove</button>`}</td></tr>`).join("")}
     </tbody></table></div>
     <form id="add-staff" class="box" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input class="input" style="max-width:260px" name="email" type="email" placeholder="name@example.org" required>
@@ -2604,13 +2739,34 @@ function renderStaff() {
       <button class="btn primary">Add staff member</button></form>`;
 }
 
+// Calls the invite-staff Edge Function, which holds the admin key. Any
+// mail failure (the built-in Supabase mailer only reaches project members
+// and allows a few per hour) comes back as a message, not a silent nothing.
+async function inviteStaff(email, btn) {
+  if (DEMO) { toast("Demo mode sends no email."); return; }
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  try {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/functions/v1/invite-staff`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, redirect_to: appUrl() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    toast(data.sent === "reset" ? `${email} already had an account — sent a password-reset email.` : `Invitation sent to ${email}.`);
+  } catch (e) {
+    toast(`Couldn't invite ${email}: ${e.message}`, true);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "Invite"; }
+}
+
 async function addStaff(form) {
   const f = new FormData(form);
   const email = String(f.get("email") || "").trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast("Enter a valid email address.", true); return; }
   try {
     await db.insert("staff", [{ email, display_name: norm(f.get("display_name")), is_admin: !!f.get("is_admin"), added_by: state.me.email }], { returning: false });
-    await reloadTables("staff"); toast(`${email} can now sign in.`); renderMain();
+    await reloadTables("staff"); renderMain();
+    toast(`${email} added. Click Invite to email them a set-password link.`);
   } catch (e) { toast(`Couldn't add: ${e.message}`, true); }
 }
 
@@ -2642,7 +2798,9 @@ document.addEventListener("click", async (ev) => {
   const a = el.dataset.action;
   if (el.tagName === "A" && a !== "lightbox") ev.preventDefault();
   switch (a) {
-    case "sign-in": signInWithGoogle(); break;
+    case "sign-in": signInWithProvider(el.dataset.provider || "google"); break;
+    case "forgot-password": requestPasswordReset(); break;
+    case "invite-staff": inviteStaff(el.dataset.email, el); break;
     case "sign-out": signOut(); break;
     case "retry": boot(); break;
     case "view": state.view = el.dataset.view; render(); window.scrollTo(0, 0); break;
@@ -2751,7 +2909,9 @@ document.addEventListener("change", (ev) => {
 
 document.addEventListener("submit", (ev) => {
   const f = ev.target;
-  if (f.id === "curated-form") { ev.preventDefault(); saveCurated(f); }
+  if (f.id === "login-form") { ev.preventDefault(); signInWithPassword(f); }
+  else if (f.id === "password-form") { ev.preventDefault(); setPassword(f); }
+  else if (f.id === "curated-form") { ev.preventDefault(); saveCurated(f); }
   else if (f.id === "combine-form") { ev.preventDefault(); saveCombine(f); }
   else if (f.id === "planting-form") { ev.preventDefault(); savePlanting(f); }
   else if (f.id === "add-staff") { ev.preventDefault(); addStaff(f); }
@@ -2791,6 +2951,11 @@ async function boot() {
   if (redirect && redirect.session) saveSession(redirect.session);
   state.session = (redirect && redirect.session) || loadStoredSession();
   if (!state.session) { state.phase = "login"; render(); return; }
+  // An invite or reset link signs the person in with a one-time token; make
+  // them choose a password before anything else, or they can never sign in
+  // again without another email.
+  if (redirect && (redirect.type === "invite" || redirect.type === "recovery")) state.pendingPassword = true;
+  if (state.pendingPassword) { state.phase = "setpassword"; render(); return; }
   try {
     await ensureFreshSession();
     if (!state.session) { state.phase = "login"; render(); return; }
