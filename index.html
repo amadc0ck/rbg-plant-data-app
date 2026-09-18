@@ -242,7 +242,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.8.0";
 const APP_UPDATED = "2026-09-18";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -1396,6 +1396,7 @@ const CURATED_FIELDS = [
   { f: "light_needs", label: "Light needs", type: "list", list: "light_needs" },
   { f: "hardiness", label: "Hardiness", type: "text" },
   { f: "water_needs", label: "Water needs", type: "list", list: "water_needs" },
+  { f: "soil_needs", label: "Soil needs", type: "list", list: "soil_needs" },
   { f: "blooming_season", label: "Blooming season", type: "multi", list: "blooming_season" },
   { f: "conservation_status", label: "Conservation status (IUCN Red List)", type: "select", options: IUCN.map(([c, l]) => [c, `${l} (${c})`]) },
   { f: "conservation_assessed_year", label: "Year assessed", type: "number", half: true },
@@ -1504,6 +1505,15 @@ function curatedSuggestions(p) {
     if (water) add("water_needs", water, r.source, null, `from “${f.water}”`);
     const type = matchListValue("plant_type", f.plant_type);
     if (type) add("plant_type", type, r.source, null, `from “${f.plant_type}”`);
+    for (const { value, sentence } of soilSuggestions(f.description)) {
+      add("soil_needs", value, r.source, null, `“${sentence.length > 120 ? sentence.slice(0, 117) + "…" : sentence}”`);
+    }
+    const seasons = seasonsFromText(f.bloom_time);
+    if (seasons.length) {
+      const allowed = listValues("blooming_season");
+      const keep = allowed.filter((x) => seasons.includes(x));
+      if (keep.length) add("blooming_season", keep, r.source, null, `from “${String(f.bloom_time).slice(0, 60)}”`);
+    }
     if (!blank(f.origin)) add("native_to_ca", mentionsCalifornia(f.origin), "derived", null, `from “${f.origin}”`);
   }
   if (p.appearances.length) {
@@ -1519,6 +1529,71 @@ function curatedSuggestions(p) {
 // the longest list value whose words all appear ("Full sun to part shade"
 // beats "Full sun" for "Full sun to light shade"). Returns null when
 // nothing fits, which is the honest answer for "Sun or Shade".
+/* ---------- reading soil and bloom season out of nursery prose ----------
+   No nursery publishes either as a field. San Marcos states soil in a
+   sentence on most plants, and bloom time arrives as anything from
+   "Spring" to "pendant apricot blooms with dark sepals throughout the
+   year". Both readers quote what they matched, so a curator can see the
+   evidence rather than trust a guess. */
+const SOIL_RULES = [
+  ["Well-drained", /well[- ]?drain|good drainage|drains? well|sharp drainage|excellent drainage|draining soil|soil that drains|decent drainage/],
+  ["Sandy / gritty", /sandy|gritty|granitic|decomposed granite|pumice|scree/],
+  ["Clay tolerant", /clay/],
+  ["Moist / rich", /rich soil|humus|moist soil|moisture[- ]retentive|loam|bog|pond/],
+  ["Tolerates most soils", /most any soil|most soils|any soil type|not fussy about soil|adaptable to soil|tolerates? (?:a )?(?:wide )?(?:range of|most) soils?/],
+];
+
+// The sentence a soil rule matched, for showing under the suggestion.
+function soilSentence(text, re) {
+  for (const sentence of String(text || "").split(/(?<=[.!?])\s+/)) {
+    if (/soil|drain/i.test(sentence) && re.test(sentence.toLowerCase())) return sentence.trim();
+  }
+  return null;
+}
+
+function soilSuggestions(description) {
+  const text = String(description || "").toLowerCase();
+  if (!/soil|drain/.test(text)) return [];
+  const out = [];
+  for (const [value, re] of SOIL_RULES) {
+    if (!re.test(text)) continue;
+    // "tolerates clay so long as it drains" is about drainage, not a clay
+    // planting recommendation -- only offer Clay tolerant on its own terms.
+    const sentence = soilSentence(description, re);
+    if (sentence) out.push({ value, sentence });
+  }
+  return out;
+}
+
+const SEASON_WORDS = [["winter", "Winter"], ["spring", "Spring"], ["summer", "Summer"], ["fall", "Fall"], ["autumn", "Fall"]];
+const MONTH_SEASON = { january: "Winter", february: "Winter", march: "Spring", april: "Spring", may: "Spring", june: "Summer",
+  july: "Summer", august: "Summer", september: "Fall", october: "Fall", november: "Fall", december: "Winter" };
+const SEASON_ORDER = ["Winter", "Spring", "Summer", "Fall"];
+
+// "Spring-Fall" means spring THROUGH fall, so the seasons between count too.
+function expandSeasonRange(text, found) {
+  for (const m of text.matchAll(/(winter|spring|summer|fall|autumn)\s*(?:-|–|—|to|through|thru)\s*(winter|spring|summer|fall|autumn)/g)) {
+    const from = SEASON_ORDER.indexOf(SEASON_WORDS.find(([w]) => w === m[1])[1]);
+    const to = SEASON_ORDER.indexOf(SEASON_WORDS.find(([w]) => w === m[2])[1]);
+    for (let i = 0; i < 4; i++) {
+      const at = (from + i) % 4;
+      found.add(SEASON_ORDER[at]);
+      if (at === to) break;
+    }
+  }
+}
+
+function seasonsFromText(raw) {
+  const text = String(raw || "").toLowerCase();
+  if (!text) return [];
+  const found = new Set();
+  if (/all year|year[- ]round|throughout the year|ever[- ]?blooming|any time/.test(text)) SEASON_ORDER.forEach((s) => found.add(s));
+  expandSeasonRange(text, found);
+  for (const [word, season] of SEASON_WORDS) if (new RegExp(`\\b${word}`).test(text)) found.add(season);
+  for (const [month, season] of Object.entries(MONTH_SEASON)) if (new RegExp(`\\b${month}`).test(text)) found.add(season);
+  return SEASON_ORDER.filter((s) => found.has(s));
+}
+
 const LIGHT_SYNONYMS = [[/light shade|partial shade|part sun|dappled/g, "part shade"], [/sun to shade/g, "sun or shade"]];
 
 function matchListValue(list, raw) {
