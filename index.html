@@ -242,7 +242,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.10.0";
+const APP_VERSION = "1.11.0";
 const APP_UPDATED = "2026-09-18";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -1246,11 +1246,21 @@ function renderHighlightTab(p) {
 
 function editionLabel(e) { return `${MONTH_NAMES[e.month - 1]} ${e.year}`; }
 
+const CARD_FACT_FIELDS = [["native_to", "Native to"], ["form_size", "Form & size"], ["sun_shade", "Sun / shade"], ["hardy_to", "Hardy to"]];
+const hasCardFacts = (a) => CARD_FACT_FIELDS.some(([f]) => !blank(a[f]));
+
+// Each appearance carries what that month's card actually printed (sql/008).
+// Older editions may have none until the PDFs are re-read, so the fact
+// columns only appear when there is something in them.
 function editionsList(p) {
   if (!p.appearances.length) return `<div class="faint">Not found in any parsed What's in Bloom PDF.</div>`;
-  return `<table class="sheet"><thead><tr><th>Edition</th><th>Listed as</th><th>PDF</th></tr></thead><tbody>
-    ${p.appearances.map((a) => `<tr><td>${esc(editionLabel(a.edition))}</td><td>${esc(a.plant_name)}</td>
-      <td><a href="${safeUrl(a.edition.pdf_url)}" target="_blank" rel="noopener">${esc(decodeURIComponent(a.edition.pdf_url.split("/").pop()))} ↗</a></td></tr>`).join("")}
+  const showFacts = p.appearances.some(hasCardFacts);
+  return `<table class="sheet"><thead><tr><th>Edition</th><th>Listed as</th>
+      ${showFacts ? CARD_FACT_FIELDS.map(([, label]) => `<th>${esc(label)}</th>`).join("") : ""}<th>PDF</th></tr></thead><tbody>
+    ${p.appearances.map((a) => `<tr><td style="white-space:nowrap">${esc(editionLabel(a.edition))}${a.card_letter ? ` <span class="pill">${esc(a.card_letter)}</span>` : ""}</td>
+      <td>${esc(a.plant_name)}${a.extra_note ? `<div class="faint">${esc(a.extra_note)}</div>` : ""}</td>
+      ${showFacts ? CARD_FACT_FIELDS.map(([f]) => `<td>${esc(a[f] || "—")}</td>`).join("") : ""}
+      <td><a href="${safeUrl(a.edition.pdf_url)}" target="_blank" rel="noopener">PDF ↗</a></td></tr>`).join("")}
     </tbody></table>`;
 }
 
@@ -1578,6 +1588,16 @@ function curatedSuggestions(p) {
       if (keep.length) add("blooming_season", keep, r.source, null, `from “${String(f.bloom_time).slice(0, 60)}”`);
     }
     if (!blank(f.origin)) add("native_to_ca", mentionsCalifornia(f.origin), "derived", null, `from “${f.origin}”`);
+  }
+  // What the monthly card itself printed, newest edition first.
+  for (const a of p.appearances.filter(hasCardFacts)) {
+    const when = editionLabel(a.edition);
+    add("native_to", a.native_to, "wib", null, when);
+    add("form_size", a.form_size, "wib", null, when);
+    add("hardiness", a.hardy_to, "wib", null, when);
+    const light = matchListValue("light_needs", a.sun_shade);
+    if (light) add("light_needs", light, "wib", null, `${when}, from “${a.sun_shade}”`);
+    if (!blank(a.native_to)) add("native_to_ca", mentionsCalifornia(a.native_to), "derived", null, `from “${a.native_to}”`);
   }
   if (p.appearances.length) {
     const allowed = listValues("blooming_season");
