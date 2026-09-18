@@ -242,7 +242,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.10.0";
 const APP_UPDATED = "2026-09-18";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -280,7 +280,7 @@ const GAPS = {
 const TABLES = [
   "source_records", "name_merges", "not_duplicates", "staff", "taxa", "accessions", "plantings",
   "garden_locations", "list_options", "wib_editions", "wib_appearances", "irisbg_imports",
-  "taxon_matches", "reference_names_used",
+  "taxon_matches", "reference_names_used", "archived_names",
 ];
 // Outside-world reference data (sql/005). Neither has an id column, so the
 // id-based incremental sync can't be used; instead the app asks for the
@@ -293,8 +293,18 @@ const TABLE_ORDER = {
   source_records: "id", name_merges: "alias_key", not_duplicates: "key_a,key_b", staff: "email", taxa: "id",
   accessions: "id", plantings: "id", garden_locations: "code", list_options: "list,sort,value",
   wib_editions: "id", wib_appearances: "edition_id,plant_name", irisbg_imports: "id",
-  taxon_matches: "name_key", reference_names_used: "source,source_id",
+  taxon_matches: "name_key", reference_names_used: "source,source_id", archived_names: "name_key",
 };
+// Why a name stopped being treated as a plant. The first three are bad
+// data (mostly the What's in Bloom PDF reader mistaking page furniture for
+// a name); the fourth is a real plant that left the garden.
+const ARCHIVE_REASONS = [
+  ["not_a_plant", "Not a plant — page text read by mistake"],
+  ["two_plants", "Two plants in one name"],
+  ["duplicate", "Duplicate, handled under another name"],
+  ["left_collection", "No longer in the collection"],
+  ["other", "Other"],
+];
 const NURSERY_LABELS = {
   smgrowers: "San Marcos Growers", anniesannuals: "Annie's Annuals", floragrubb: "Flora Grubb",
   waltzingmatilija: "Waltzing Matilija", crescenthill: "Crescent Hill Nursery",
@@ -703,7 +713,7 @@ const liveDb = {
 const DEMO_KEY_TABLES = { source_records: "plant_name", accessions: "plant_name", wib_appearances: "plant_name" };
 const DEMO_PK = {
   source_records: ["source", "source_id"], name_merges: ["alias_key"], not_duplicates: ["key_a", "key_b"], staff: ["email"],
-  taxa: ["id"], accessions: ["id"], plantings: ["id"], garden_locations: ["code"], list_options: ["list", "value"],
+  taxa: ["id"], accessions: ["id"], plantings: ["id"], garden_locations: ["code"], list_options: ["list", "value"], archived_names: ["name_key"],
   irisbg_imports: ["id"], wib_editions: ["id"],
 };
 const DEMO_IDENTITY = new Set(["source_records", "taxa", "accessions", "plantings", "irisbg_imports", "wib_editions"]);
@@ -740,6 +750,7 @@ const demoDb = {
     const now = new Date().toISOString();
     if (table === "name_merges") return { merged_by: me, merged_at: now, ...row };
     if (table === "not_duplicates") return { marked_by: me, marked_at: now, ...row };
+    if (table === "archived_names") return { archived_by: me, archived_at: now, ...row };
     if (table === "irisbg_imports") return { imported_by: me, imported_at: now, summary: {}, ...row };
     if (table === "taxa") return { blooming_season: [], provenance: {}, created_at: now, updated_at: now, ...row };
     if (table === "accessions") return { in_latest_export: true, created_at: now, updated_at: now, ...row };
@@ -917,7 +928,13 @@ function buildIndex() {
 
   const canonicalNames = new Map([...mergeMap.values()].map((m) => [m.canonical_key, m.canonical_name]));
   for (const p of idx.plants.values()) finalizePlant(p, canonicalNames);
-  idx.list = [...idx.plants.values()];
+  // Archived names stay in the map (a link or a merge may still point at
+  // one) but leave every list: Browse, the dashboard counts, duplicate
+  // suggestions and the CSV all read idx.list.
+  const archived = new Map(d.archived_names.map((a) => [a.name_key, a]));
+  for (const p of idx.plants.values()) p.archived = archived.get(p.key) || null;
+  idx.list = [...idx.plants.values()].filter((p) => !p.archived);
+  idx.archived = [...idx.plants.values()].filter((p) => p.archived);
   state.dupes = null;
 }
 
@@ -1341,6 +1358,51 @@ async function suggestNames(key, btn) {
   renderPanel();
 }
 
+function renderArchiveBox(p) {
+  if (p.archived) {
+    const label = (ARCHIVE_REASONS.find(([v]) => v === p.archived.reason) || [])[1] || p.archived.reason;
+    return `<div class="section"><div class="notice">
+      <strong>Archived.</strong> ${esc(label)}${p.archived.note ? ` — ${esc(p.archived.note)}` : ""}
+      <div class="faint">by ${esc(shortEmail(p.archived.archived_by))} · ${esc(fmtDate(p.archived.archived_at))}</div>
+      <div style="margin-top:6px"><button class="btn small" data-action="restore-name" data-key="${attr(p.key)}">Restore to the collection</button></div>
+    </div></div>`;
+  }
+  return `<div class="section"><details><summary class="faint">Archive this name</summary>
+    <form id="archive-form" data-key="${attr(p.key)}" style="margin-top:8px">
+      <p class="faint">Takes it out of Browse, the dashboard counts and duplicate suggestions. Nothing is deleted — the Tumblr post, PDF appearance or IrisBG row stays exactly as it was, and you can restore it here at any time.</p>
+      <label class="lbl" for="archive-reason">Why</label>
+      <select class="input" id="archive-reason" name="reason">${ARCHIVE_REASONS.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select>
+      <label class="lbl" for="archive-note" style="margin-top:6px">Note (optional)</label>
+      <input class="input" id="archive-note" name="note" placeholder="Anything worth remembering">
+      <button class="btn small danger" type="submit" style="margin-top:8px">Archive “${esc(p.displayName)}”</button>
+    </form></details></div>`;
+}
+
+async function archiveName(form) {
+  const p = state.idx.plants.get(form.dataset.key);
+  if (!p) return;
+  const f = new FormData(form);
+  try {
+    await db.insert("archived_names", [{
+      name_key: p.key, display_name: p.displayName, reason: f.get("reason"),
+      note: norm(f.get("note")), archived_by: state.me.email,
+    }], { returning: false });
+    await reloadTables("archived_names");
+    toast(`“${p.displayName}” archived.`);
+    state.selectedKey = null;
+    render();
+  } catch (e) { toast(`Couldn't archive: ${e.message}`, true); }
+}
+
+async function restoreName(key) {
+  try {
+    await db.remove("archived_names", { name_key: key });
+    await reloadTables("archived_names");
+    toast("Restored to the collection.");
+    render();
+  } catch (e) { toast(`Couldn't restore: ${e.message}`, true); }
+}
+
 function renderNameCheck(p) {
   const m = p.match;
   const st = matchStatus(m);
@@ -1685,6 +1747,7 @@ function renderCuratedTab(p) {
     if (f.half && CURATED_FIELDS[i + 1] && CURATED_FIELDS[i + 1].half) { rows.push(`<div class="grid2">${fieldHtml(f)}${fieldHtml(CURATED_FIELDS[i + 1])}</div>`); i++; }
     else rows.push(fieldHtml(f));
   }
+  if (p.archived) return `${renderArchiveBox(p)}${renderNameCheck(p)}`;
   return `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}
     <div class="section"><div class="row-between"><h3>Curated record</h3>
       <span class="faint">${p.taxon ? `Last edited ${esc(fmtDate(t.updated_at))}${t.updated_by ? ` by ${esc(shortEmail(t.updated_by))}` : ""}` : "Not curated yet — saving creates the record"}</span></div>
@@ -1694,6 +1757,7 @@ function renderCuratedTab(p) {
           ${p.taxon && state.me?.is_admin ? `<button type="button" class="btn small danger" data-action="delete-taxon">Delete curated record</button>` : ""}</div>
       </form></div>
     ${renderAccessionsSection(p)}
+    ${renderArchiveBox(p)}
     <div class="section"><h3>Bloom history (${p.appearances.length})</h3>${editionsList(p)}</div>`;
 }
 
@@ -3170,10 +3234,23 @@ const LIST_COLUMN = { plant_type: "plant_type", light_needs: "light_needs", wate
 
 function renderAdmin() {
   if (!state.me?.is_admin) return `<div class="empty">Admins only.</div>`;
-  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["changes", "Change history"], ["picklists", "Picklists"], ["staff", "Staff"]];
-  const body = { import: renderImportScreen, history: renderImportHistory, changes: renderChangeExport, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
+  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["changes", "Change history"], ["archived", "Archived"], ["picklists", "Picklists"], ["staff", "Staff"]];
+  const body = { import: renderImportScreen, history: renderImportHistory, changes: renderChangeExport, archived: renderArchived, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
   return `<h1 class="page-title">Admin</h1>
     <div class="seg" style="margin:6px 0 16px">${tabs.map(([t, l]) => `<button class="${state.adminTab === t ? "active" : ""}" data-action="admin-tab" data-tab="${t}">${l}</button>`).join("")}</div>${body()}`;
+}
+
+function renderArchived() {
+  const list = [...state.data.archived_names].sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at)));
+  if (!list.length) return `<div class="empty">Nothing is archived. Archive a name from the bottom of its Curated tab.</div>`;
+  return `<p class="muted">${plural(list.length, "name")} kept out of Browse, the dashboard counts and duplicate suggestions. The underlying source records are untouched.</p>
+    <div class="table-wrap"><table class="sheet"><thead><tr><th>Name</th><th>Why</th><th>Note</th><th>Archived</th><th></th></tr></thead><tbody>
+    ${list.map((a) => `<tr><td class="name">${esc(a.display_name)}</td>
+      <td>${esc((ARCHIVE_REASONS.find(([v]) => v === a.reason) || [])[1] || a.reason)}</td>
+      <td class="faint">${esc(a.note || "")}</td>
+      <td class="faint">${esc(fmtDate(a.archived_at))} by ${esc(shortEmail(a.archived_by))}</td>
+      <td><button class="btn small" data-action="restore-name" data-key="${attr(a.name_key)}">Restore</button></td></tr>`).join("")}
+    </tbody></table></div>`;
 }
 
 function renderImportHistory() {
@@ -3361,6 +3438,7 @@ document.addEventListener("click", async (ev) => {
     case "unmerge": unmerge(el.dataset.alias); break;
     case "more-dupes": state.dupLimit += 25; renderMain(); break;
     case "suggest-names": suggestNames(el.dataset.key, el); break;
+    case "restore-name": restoreName(el.dataset.key); break;
     case "count-changes": countChangeExport(); break;
     case "export-changes": runChangeExport(); break;
     case "reset-change-export": state.changeExport = { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null }; renderMain(); break;
@@ -3459,7 +3537,8 @@ document.addEventListener("change", (ev) => {
 
 document.addEventListener("submit", (ev) => {
   const f = ev.target;
-  if (f.id === "login-form") { ev.preventDefault(); signInWithPassword(f); }
+  if (f.id === "archive-form") { ev.preventDefault(); archiveName(f); }
+  else if (f.id === "login-form") { ev.preventDefault(); signInWithPassword(f); }
   else if (f.id === "password-form") { ev.preventDefault(); setPassword(f); }
   else if (f.id === "curated-form") { ev.preventDefault(); saveCurated(f); }
   else if (f.id === "combine-form") { ev.preventDefault(); saveCombine(f); }
