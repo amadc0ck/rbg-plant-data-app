@@ -242,7 +242,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.9.0";
 const APP_UPDATED = "2026-09-18";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -322,6 +322,7 @@ const state = {
   changeExport: { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null },
   dashTile: "all4",       // which dashboard number's plant list is showing
   dashLimit: 100,
+  dashFilters: null,      // set from DASH_FILTER_DEFAULTS at boot
   importState: null,      // IrisBG import wizard state
   mergeQuery: "",
   mergePicks: new Set(),  // plant keys ticked in the panel's merge search
@@ -2366,6 +2367,107 @@ function dashTile(id) {
   return DASH_SECTIONS[0].tiles[1];
 }
 
+/* ---------- filtering the dashboard list ----------
+   The cards choose WHICH question is being asked (one at a time, her
+   call); these narrow the answer. Everything is computed from the plant
+   index, so filtering costs nothing and needs no round trip. */
+const DASH_FILTER_DEFAULTS = {
+  q: "", genus: "", family: "", source: "", curated: "", gap: "",
+  status: "", nursery: "", location: "", photo: "", description: "", accession: "", gps: "",
+};
+const BOTANICAL_STATUS = [
+  ["accepted", "Accepted name"], ["synonym", "Old synonym"], ["genus", "Genus only"],
+  ["nomatch", "No botanical match"], ["unchecked", "Not checked"],
+];
+
+function botanicalStatus(p) {
+  const m = p.match;
+  if (!m) return "unchecked";
+  if (m.matched_as === "no match") return "nomatch";
+  if (/SYNONYM/.test(m.taxonomic_status || "")) return "synonym";
+  if (m.matched_as === "genus only") return "genus";
+  return "accepted";
+}
+
+// Every location code a plant sits in, bed and sub-location alike.
+function plantLocationCodes(p) {
+  const out = new Set();
+  for (const a of p.accessions) for (const pl of a._plantings) {
+    for (const code of [pl.bed, pl.sub_location, pl.location_code]) if (code) out.add(code);
+  }
+  return out;
+}
+
+function dashFilterMatch(p, f) {
+  const yesNo = (want, has) => !want || (want === "yes") === !!has;
+  if (f.q && !p.haystack.includes(f.q.trim().toLowerCase())) return false;
+  if (f.genus && p.genus !== f.genus) return false;
+  if (f.family && p.family !== f.family) return false;
+  if (f.source === "tumblr" && !p.tumblr.length) return false;
+  if (f.source === "website" && !p.website.length) return false;
+  if (f.source === "wib" && !p.hasWib) return false;
+  if (f.source === "irisbg" && !p.hasIris) return false;
+  if (!yesNo(f.curated, p.taxon)) return false;
+  if (f.gap && !p.gaps.has(f.gap)) return false;
+  if (f.status && botanicalStatus(p) !== f.status) return false;
+  if (f.nursery && !p.references.some((r) => r.source === f.nursery)) return false;
+  if (f.location && !plantLocationCodes(p).has(f.location)) return false;
+  if (!yesNo(f.photo, p.photo)) return false;
+  if (!yesNo(f.description, p.description)) return false;
+  if (!yesNo(f.accession, p.accessions.length)) return false;
+  if (!yesNo(f.gps, p.hasGps)) return false;
+  return true;
+}
+
+function dashFiltersActive() {
+  return Object.entries(state.dashFilters).some(([k, v]) => v !== DASH_FILTER_DEFAULTS[k]);
+}
+
+function renderDashFilters() {
+  const f = state.dashFilters;
+  const counts = (pick) => {
+    const m = new Map();
+    for (const p of state.idx.list) { const v = pick(p); if (v) m.set(v, (m.get(v) || 0) + 1); }
+    return [...m].sort((a, b) => a[0].localeCompare(b[0])).map(([v, n]) => [v, `${v} (${n})`]);
+  };
+  const locations = [...new Set(state.idx.list.flatMap((p) => [...plantLocationCodes(p)]))].sort()
+    .map((c) => [c, locationName(c) ? `${c} — ${locationName(c)}` : c]);
+  const yesNo = (label) => [["yes", `Has ${label}`], ["no", `No ${label}`]];
+  return `<div class="toolbar">
+      <input class="input" id="dash-q" type="search" placeholder="Search name, description, accession…" value="${attr(f.q)}" style="max-width:240px" autocomplete="off">
+      <select data-dashf="genus">${optionList(counts((p) => p.genus), f.genus, "All genera")}</select>
+      <select data-dashf="family">${optionList(counts((p) => p.family), f.family, "All families")}</select>
+      <select data-dashf="source">${optionList([["tumblr", "Has Tumblr"], ["website", "Has Plant Highlight"], ["wib", "Has What's in Bloom"], ["irisbg", "Has IrisBG"]], f.source, "All sources")}</select>
+      <select data-dashf="gap">${optionList(Object.entries(GAPS), f.gap, "Any completeness")}</select>
+      <select data-dashf="status">${optionList(BOTANICAL_STATUS, f.status, "Any name status")}</select>
+      <select data-dashf="nursery">${optionList(Object.entries(NURSERY_LABELS), f.nursery, "Any nursery")}</select>
+      <select data-dashf="location" ${locations.length ? "" : "disabled title='Locations come from IrisBG plantings'"}>${optionList(locations, f.location, "All locations")}</select>
+      <select data-dashf="curated">${optionList([["yes", "Curated"], ["no", "Not curated"]], f.curated, "Curated or not")}</select>
+      <select data-dashf="photo">${optionList(yesNo("photo"), f.photo, "Photo or not")}</select>
+      <select data-dashf="description">${optionList(yesNo("description"), f.description, "Description or not")}</select>
+      <select data-dashf="accession">${optionList(yesNo("accession"), f.accession, "Accession or not")}</select>
+      <select data-dashf="gps">${optionList(yesNo("GPS"), f.gps, "GPS or not")}</select>
+      ${dashFiltersActive() ? `<button class="btn link" data-action="clear-dash-filters">Clear filters</button>` : ""}
+    </div>`;
+}
+
+function dashList() {
+  const current = dashTile(state.dashTile);
+  const list = state.idx.list.filter(current.test).filter((p) => dashFilterMatch(p, state.dashFilters))
+    .sort((a, b) => a.sortName.localeCompare(b.sortName));
+  const shown = list.slice(0, state.dashLimit);
+  const tileTotal = state.idx.list.filter(current.test).length;
+  return `<div id="dash-list-body">
+    <h2 class="dash-h">${esc(current.label)} · ${list.length.toLocaleString()}${list.length !== tileTotal ? ` <span class="faint">of ${tileTotal.toLocaleString()}</span>` : ""}</h2>
+    ${current.hint ? `<div class="notice">${esc(current.hint)}</div>` : ""}
+    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Gaps</th></tr></thead><tbody>
+      ${shown.map((p) => `<tr class="clickable" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td>
+        <td>${[...p.gaps].map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}${p.taxon && !p.complete ? ` <span class="pill sky" title="${attr(p.missing.join(", "))}">${plural(p.missing.length, "curated field")} to go</span>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">${dashFiltersActive() ? "No plants match the card and these filters together." : "No plants."}</div>`}
+    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dash">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}
+  </div>`;
+}
+
 function renderDashboard() {
   const plants = state.idx.list;
   const current = dashTile(state.dashTile);
@@ -2374,16 +2476,17 @@ function renderDashboard() {
       const n = t.id === "total" ? plants.length : plants.reduce((c, p) => c + (t.test(p) ? 1 : 0), 0);
       return `<div class="stat clickable ${t.id === current.id ? "active" : ""}" data-action="dash-tile" data-tile="${t.id}"><div class="n">${n.toLocaleString()}</div><div class="l">${esc(t.label)}</div></div>`;
     }).join("")}</div>`).join("");
-  const list = plants.filter(current.test).sort((a, b) => a.sortName.localeCompare(b.sortName));
-  const shown = list.slice(0, state.dashLimit);
   return `<h1 class="page-title">Dashboard</h1>${sections}
-    <h2 class="dash-h" id="dash-list">${esc(current.label)} · ${list.length.toLocaleString()}</h2>
-    ${current.hint ? `<div class="notice">${esc(current.hint)}</div>` : ""}
-    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Gaps</th></tr></thead><tbody>
-      ${shown.map((p) => `<tr class="clickable" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td>
-        <td>${[...p.gaps].map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}${p.taxon && !p.complete ? ` <span class="pill sky" title="${attr(p.missing.join(", "))}">${plural(p.missing.length, "curated field")} to go</span>` : ""}</td></tr>`).join("")}
-    </tbody></table></div>` : `<div class="empty">No plants.</div>`}
-    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dash">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}`;
+    <div id="dash-list">${renderDashFilters()}${dashList()}</div>`;
+}
+
+// Only the rows are swapped while typing, so the search box keeps focus.
+function refreshDashList() {
+  const el = document.getElementById("dash-list-body");
+  if (!el) { renderMain(); return; }
+  const tmp = document.createElement("div");
+  tmp.innerHTML = dashList();
+  el.replaceWith(tmp.firstElementChild);
 }
 
 /* ==================== CHANGE HISTORY EXPORT ====================
@@ -3262,7 +3365,8 @@ document.addEventListener("click", async (ev) => {
     case "export-changes": runChangeExport(); break;
     case "reset-change-export": state.changeExport = { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null }; renderMain(); break;
     case "dash-tile": state.dashTile = el.dataset.tile; state.dashLimit = 100; renderMain(); document.getElementById("dash-list")?.scrollIntoView({ behavior: "smooth", block: "start" }); break;
-    case "more-dash": state.dashLimit += 100; renderMain(); break;
+    case "more-dash": state.dashLimit += 100; refreshDashList(); break;
+    case "clear-dash-filters": state.dashFilters = { ...DASH_FILTER_DEFAULTS }; state.dashLimit = 100; renderMain(); break;
     case "admin-tab": state.adminTab = el.dataset.tab; renderMain(); break;
     case "run-import": runIrisImport(); break;
     case "cancel-import": state.importState = null; renderMain(); break;
@@ -3295,6 +3399,9 @@ document.addEventListener("input", (ev) => {
       if (state.view !== "browse") { state.view = "browse"; render(); document.getElementById("search")?.focus(); }
       else renderMain();
     }, 180);
+  } else if (t.id === "dash-q") {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { state.dashFilters.q = t.value; state.dashLimit = 100; refreshDashList(); }, 180);
   } else if (t.id === "change-export-q") {
     state.changeExport.q = t.value;
     state.changeExport.count = null;
@@ -3322,7 +3429,11 @@ document.addEventListener("input", (ev) => {
 
 document.addEventListener("change", (ev) => {
   const t = ev.target;
-  if (t.dataset.changeExport) {
+  if (t.dataset.dashf) {
+    state.dashFilters[t.dataset.dashf] = t.value;
+    state.dashLimit = 100;
+    renderMain();
+  } else if (t.dataset.changeExport) {
     state.changeExport[t.dataset.changeExport] = t.value;
     state.changeExport.count = null;
     state.changeExport.status = null;
@@ -3372,6 +3483,7 @@ async function loadMe() {
 
 async function boot() {
   state.error = null;
+  state.dashFilters = state.dashFilters || { ...DASH_FILTER_DEFAULTS };
   if (DEMO) {
     try {
       const res = await fetch("demo-data.json", { cache: "no-store" });
