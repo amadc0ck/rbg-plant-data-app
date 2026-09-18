@@ -242,8 +242,8 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.6.0";
-const APP_UPDATED = "2026-09-16";
+const APP_VERSION = "1.7.0";
+const APP_UPDATED = "2026-09-18";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
@@ -258,7 +258,9 @@ const DEMO = new URLSearchParams(location.search).has("demo");
 const SOURCE_LABELS = { tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG", accession: "IrisBG accession", "wib edition": "What's in Bloom edition" };
 const PROVENANCE_LABELS = {
   tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG",
-  iucn: "IUCN", manual: "typed in", derived: "derived",
+  iucn: "IUCN", manual: "typed in", derived: "derived", gbif: "GBIF",
+  smgrowers: "San Marcos Growers", anniesannuals: "Annie's Annuals", floragrubb: "Flora Grubb",
+  waltzingmatilija: "Waltzing Matilija", crescenthill: "Crescent Hill Nursery",
 };
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const IUCN = [
@@ -278,12 +280,24 @@ const GAPS = {
 const TABLES = [
   "source_records", "name_merges", "not_duplicates", "staff", "taxa", "accessions", "plantings",
   "garden_locations", "list_options", "wib_editions", "wib_appearances", "irisbg_imports",
+  "taxon_matches", "reference_names_used",
 ];
+// Outside-world reference data (sql/005). Neither has an id column, so the
+// id-based incremental sync can't be used; instead the app asks for the
+// newest fetched_at (one row) and only re-downloads when the bot has
+// refreshed something. Without that check every page load would pull a
+// megabyte or so of catalogue text out of the shared egress budget.
+const REFERENCE_TABLES = { taxon_matches: "fetched_at", reference_names_used: "fetched_at" };
 // Paging needs a stable, unique sort or rows repeat/vanish between pages.
 const TABLE_ORDER = {
   source_records: "id", name_merges: "alias_key", not_duplicates: "key_a,key_b", staff: "email", taxa: "id",
   accessions: "id", plantings: "id", garden_locations: "code", list_options: "list,sort,value",
   wib_editions: "id", wib_appearances: "edition_id,plant_name", irisbg_imports: "id",
+  taxon_matches: "name_key", reference_names_used: "source,source_id",
+};
+const NURSERY_LABELS = {
+  smgrowers: "San Marcos Growers", anniesannuals: "Annie's Annuals", floragrubb: "Flora Grubb",
+  waltzingmatilija: "Waltzing Matilija", crescenthill: "Crescent Hill Nursery",
 };
 
 const state = {
@@ -303,6 +317,7 @@ const state = {
   dupLimit: 25,
   dupQuery: "",
   combine: null,          // {keepKey, keys, back} while combining curated records
+  nameSuggestions: null,  // {key, rows} from suggest_reference_names()
   // Change-history export (Admin). Nothing is held here but the filters.
   changeExport: { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null },
   dashTile: "all4",       // which dashboard number's plant list is showing
@@ -881,6 +896,24 @@ function buildIndex() {
     p.taxon = t;
   }
 
+  // Outside references hang off every spelling the plant has, not just its
+  // canonical key: the nursery may list the name IrisBG uses while GBIF
+  // answered for the Tumblr spelling.
+  const matchByKey = new Map(d.taxon_matches.map((m) => [m.name_key, m]));
+  const refsByKey = new Map();
+  for (const r of d.reference_names_used) {
+    if (!refsByKey.has(r.name_key)) refsByKey.set(r.name_key, []);
+    refsByKey.get(r.name_key).push(r);
+  }
+  const MATCH_RANK = { "as written": 0, "without cultivar": 1, "without notes": 2, "genus + species only": 3, "genus only": 4, "no match": 5 };
+  for (const p of idx.plants.values()) {
+    const keys = [p.key, ...p.spellings.keys()];
+    p.matches = [...new Set(keys)].map((k) => matchByKey.get(k)).filter(Boolean)
+      .sort((a, b) => (MATCH_RANK[a.matched_as] ?? 9) - (MATCH_RANK[b.matched_as] ?? 9) || (b.confidence || 0) - (a.confidence || 0));
+    p.match = p.matches[0] || null;
+    p.references = [...new Set(keys)].flatMap((k) => refsByKey.get(k) || []);
+  }
+
   const canonicalNames = new Map([...mergeMap.values()].map((m) => [m.canonical_key, m.canonical_name]));
   for (const p of idx.plants.values()) finalizePlant(p, canonicalNames);
   idx.list = [...idx.plants.values()];
@@ -1275,6 +1308,69 @@ function renderMergeResults(p) {
       </div></div>`).join("")}</div>`;
 }
 
+/* ---------- name check (GBIF + the five nurseries) ----------
+   Advice, never a correction. GBIF answers confidently even when it is
+   wrong -- "Aeonium hybrid" comes back as Aeonium x barbatum, confidence
+   100 -- so the screen always says HOW the match was reached and from
+   which spelling, and every value is a suggestion a person accepts. */
+function matchStatus(m) {
+  if (!m) return { tone: "", label: "Not checked yet" };
+  if (m.matched_as === "no match") return { tone: "gold", label: "No botanical match" };
+  if (m.taxonomic_status === "SYNONYM" || m.taxonomic_status === "HETEROTYPIC_SYNONYM") return { tone: "gold", label: "Old name (synonym)" };
+  if (m.taxonomic_status === "DOUBTFUL") return { tone: "gold", label: "Doubtful name" };
+  if (m.matched_as === "as written") return { tone: "sage", label: "Accepted, as written" };
+  if (m.matched_as === "genus only") return { tone: "sky", label: "Genus recognised" };
+  return { tone: "sky", label: `Accepted, ${m.matched_as}` };
+}
+
+async function suggestNames(key, btn) {
+  const p = state.idx.plants.get(key);
+  if (!p) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Looking…"; }
+  try {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/rpc/suggest_reference_names`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: p.displayName, n: 6 }),
+    });
+    if (!res.ok) throw await pgError(res);
+    state.nameSuggestions = { key, rows: await res.json() };
+  } catch (e) {
+    state.nameSuggestions = { key, rows: [], error: e.message };
+  }
+  renderPanel();
+}
+
+function renderNameCheck(p) {
+  const m = p.match;
+  const st = matchStatus(m);
+  const sugg = state.nameSuggestions && state.nameSuggestions.key === p.key ? state.nameSuggestions : null;
+  const refs = p.references.slice().sort((a, b) => a.source.localeCompare(b.source));
+  const accepted = m && m.accepted_name && m.accepted_name !== m.scientific_name ? m.accepted_name : null;
+  return `<div class="section"><div class="row-between"><h3>Name check</h3><span class="pill ${st.tone}">${esc(st.label)}</span></div>
+    ${m ? `<div class="kv" style="margin-top:6px">
+        ${accepted ? `<div class="k">Accepted name</div><div><strong>${esc(accepted)}</strong></div>` : ""}
+        <div class="k">GBIF matched</div><div>${esc(m.canonical_name || "—")} <span class="faint">(${esc(m.matched_as)}${m.match_type ? `, ${esc(m.match_type.toLowerCase())}` : ""}${m.confidence ? `, confidence ${m.confidence}` : ""})</span></div>
+        ${m.family ? `<div class="k">Family</div><div>${esc(m.family)}</div>` : ""}
+        ${m.name_key !== p.key ? `<div class="k">From spelling</div><div class="faint">${esc(m.plant_name)}</div>` : ""}
+      </div>
+      ${m.powo_url ? `<div style="margin-top:6px"><a href="${safeUrl(m.powo_url)}" target="_blank" rel="noopener">Look it up on Plants of the World Online ↗</a></div>` : ""}`
+    : `<div class="faint">No botanical check has run for this name yet.</div>`}
+    ${m && m.matched_as === "no match" ? `<div class="notice" style="margin-top:8px">Nothing in the botanical backbone matches this name, even after dropping cultivars and notes — usually a spelling to fix.
+      <button class="btn small" data-action="suggest-names" data-key="${attr(p.key)}">Find near spellings</button></div>` : ""}
+    ${sugg ? (sugg.error ? `<div class="notice bad">${esc(sugg.error)}</div>`
+      : sugg.rows.length ? `<div class="box" style="margin-top:6px"><div class="faint">Nursery catalogues spell it like this:</div>
+          ${sugg.rows.map((r) => `<div><a href="${safeUrl(r.url)}" target="_blank" rel="noopener">${esc(r.plant_name)}</a> <span class="faint">${esc(NURSERY_LABELS[r.source] || r.source)}</span></div>`).join("")}</div>`
+        : `<div class="faint" style="margin-top:6px">No near spelling in any nursery catalogue either.</div>`) : ""}
+    <div style="margin-top:8px"><div class="k faint">In nursery catalogues (${refs.length})</div>
+      ${refs.length ? refs.map((r) => `<div class="row-between" style="gap:8px">
+          <div><a href="${safeUrl(r.url)}" target="_blank" rel="noopener">${esc(r.plant_name)}</a>
+            <span class="faint">${esc(NURSERY_LABELS[r.source] || r.source)}${r.facts?.common_name ? ` · ${esc(r.facts.common_name)}` : ""}</span></div>
+          ${r.photo_url ? `<a class="faint" href="${safeUrl(r.photo_url)}" target="_blank" rel="noopener">their photo ↗</a>` : ""}
+        </div>`).join("")
+        : `<div class="faint">Not listed by San Marcos Growers, Annie's Annuals, Flora Grubb, Waltzing Matilija or Crescent Hill.</div>`}
+    </div></div>`;
+}
+
 /* ==================== CURATED RECORD ====================
    One taxa row per plant (its canonical name_key). Every field shows the
    values the sources suggest next to it with a "Use" button, and saving
@@ -1388,6 +1484,28 @@ function curatedSuggestions(p) {
     }
     if (!blank(d.native_to)) add("native_to_ca", mentionsCalifornia(d.native_to), "derived", null, `from “${d.native_to}”`);
   }
+  // GBIF settles family, and genus when it recognised the name properly.
+  if (p.match && p.match.matched_as !== "no match") {
+    add("family", p.match.family, "gbif", null, p.match.matched_as === "as written" ? null : `matched ${p.match.matched_as}`);
+    if (p.match.matched_as === "as written" || p.match.matched_as === "without cultivar") add("genus", p.match.genus, "gbif", null);
+  }
+  // The nurseries publish garden facts in their own words: map the ones
+  // that line up with a picklist, and offer the rest as free text.
+  for (const r of p.references) {
+    const f = r.details || r.facts || {};
+    add("common_name", f.common_name, r.source, null);
+    add("native_to", f.origin, r.source, null);
+    add("form_size", f.size, r.source, null);
+    add("hardiness", f.hardiness, r.source, null);
+    add("family", f.family ? String(f.family).replace(/\s*\(.*$/, "") : null, r.source, null);
+    const light = matchListValue("light_needs", f.sun);
+    if (light) add("light_needs", light, r.source, null, `from “${f.sun}”`);
+    const water = matchListValue("water_needs", f.water);
+    if (water) add("water_needs", water, r.source, null, `from “${f.water}”`);
+    const type = matchListValue("plant_type", f.plant_type);
+    if (type) add("plant_type", type, r.source, null, `from “${f.plant_type}”`);
+    if (!blank(f.origin)) add("native_to_ca", mentionsCalifornia(f.origin), "derived", null, `from “${f.origin}”`);
+  }
   if (p.appearances.length) {
     const allowed = listValues("blooming_season");
     const seasons = [...new Set(p.appearances.map((a) => SEASON_BY_MONTH[a.edition.month]))].filter((s) => allowed.includes(s));
@@ -1395,6 +1513,31 @@ function curatedSuggestions(p) {
     if (seasons.length) add("blooming_season", allowed.filter((s) => seasons.includes(s)), "derived", null, `appeared in ${months.join(", ")}`);
   }
   return sugg;
+}
+
+// Nursery wording -> one of our picklist values. Exact match first, then
+// the longest list value whose words all appear ("Full sun to part shade"
+// beats "Full sun" for "Full sun to light shade"). Returns null when
+// nothing fits, which is the honest answer for "Sun or Shade".
+const LIGHT_SYNONYMS = [[/light shade|partial shade|part sun|dappled/g, "part shade"], [/sun to shade/g, "sun or shade"]];
+
+function matchListValue(list, raw) {
+  let text = String(raw || "").toLowerCase().trim();
+  if (!text) return null;
+  if (list === "light_needs") {
+    for (const [re, to] of LIGHT_SYNONYMS) text = text.replace(re, to);
+    // "Sun or Shade" means the plant takes either, which is not one of our
+    // four values -- offering "Shade" for it would be a quiet lie.
+    if (/\bor\b/.test(text) && /sun/.test(text) && /shade/.test(text)) return null;
+  }
+  const values = listValues(list);
+  const exact = values.find((v) => v.toLowerCase() === text);
+  if (exact) return exact;
+  const scored = values
+    .map((v) => ({ v, words: v.toLowerCase().replace(/[^a-z ]/g, "").split(/\s+/).filter((w) => w.length > 2) }))
+    .filter((x) => x.words.length && x.words.every((w) => text.includes(w)))
+    .sort((a, b) => b.words.length - a.words.length);
+  return scored.length ? scored[0].v : null;
 }
 
 function displayValue(field, v) {
@@ -1466,7 +1609,7 @@ function renderCuratedTab(p) {
     if (f.half && CURATED_FIELDS[i + 1] && CURATED_FIELDS[i + 1].half) { rows.push(`<div class="grid2">${fieldHtml(f)}${fieldHtml(CURATED_FIELDS[i + 1])}</div>`); i++; }
     else rows.push(fieldHtml(f));
   }
-  return `${renderPanelDupes(p)}${renderNamesSection(p)}
+  return `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}
     <div class="section"><div class="row-between"><h3>Curated record</h3>
       <span class="faint">${p.taxon ? `Last edited ${esc(fmtDate(t.updated_at))}${t.updated_by ? ` by ${esc(shortEmail(t.updated_by))}` : ""}` : "Not curated yet — saving creates the record"}</span></div>
       <form id="curated-form" data-key="${attr(p.key)}" autocomplete="off">${rows.join("")}
@@ -2135,6 +2278,10 @@ const DASH_SECTIONS = [
     { id: "wib-repeat", label: "In What's in Bloom 2+ editions", test: (p) => p.appearances.length > 1 },
     { id: "wib-no-facts", label: "In a What's in Bloom PDF, no fact values", test: (p) => p.appearances.length > 0 && !p.wib.some(hasWibFacts), hint: "The facts come from the reference sheet only, which doesn't cover these yet." },
     { id: "gps", label: "Plantings without GPS", test: (p) => p.plantingCount > 0 && !p.hasGps, hint: "Open the plant, then Edit a planting under Accessions to add its GPS point." },
+    { id: "name-nomatch", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", hint: "Usually a spelling to fix. Open the plant and use “Find near spellings” under Name check." },
+    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), hint: "GBIF knows a currently accepted name for these. Check it against the nursery catalogues before renaming — the trade often keeps the old name." },
+    { id: "name-genus-only", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", hint: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
+    { id: "no-reference", label: "In no nursery catalogue", test: (p) => !p.references.length, hint: "Not listed by any of the five nurseries. Expected for rare collection plants, suspicious for a common one." },
   ] },
   { title: "Gaps", tiles: Object.entries(GAPS).map(([g, label]) => ({ id: `gap-${g}`, label, test: (p) => p.gaps.has(g), hint: GAP_FIX[g] })) },
 ];
@@ -2445,10 +2592,28 @@ async function syncIncremental(table) {
 
 // Pulls everything from Supabase (incrementally where possible) and
 // refreshes the cache. Returns a short description for the console.
+// Is the reference data we already hold still current? One row over the
+// wire answers it.
+async function referenceIsCurrent(table) {
+  const stamp = REFERENCE_TABLES[table];
+  const cached = state.data[table] || [];
+  if (!cached.length) return false;
+  const res = await authedFetch(`${CONFIG.SUPABASE_URL}/rest/v1/${table}?select=${stamp}&order=${stamp}.desc&limit=1`);
+  if (!res.ok) throw await pgError(res);
+  const newest = (await res.json())[0];
+  if (!newest) return true;
+  const mine = cached.reduce((m, r) => (r[stamp] > m ? r[stamp] : m), "");
+  return mine >= newest[stamp];
+}
+
 async function syncFromServer() {
   const notes = [];
   await Promise.all(TABLES.map(async (t) => {
-    if (STAMP_COLUMN[t]) {
+    if (REFERENCE_TABLES[t]) {
+      if (await referenceIsCurrent(t)) { notes.push(`${t}: unchanged`); return; }
+      state.data[t] = await db.selectAll(t);
+      notes.push(`${t}: ${state.data[t].length} refreshed`);
+    } else if (STAMP_COLUMN[t]) {
       const r = await syncIncremental(t);
       state.data[t] = r.rows;
       notes.push(`${t}: ${r.fetched} fetched`);
@@ -2970,7 +3135,7 @@ function refreshMergeResults() {
 }
 
 function selectPlant(key) {
-  if (state.selectedKey !== key) { state.mergeQuery = ""; state.mergePicks.clear(); state.editingPlanting = null; }
+  if (state.selectedKey !== key) { state.mergeQuery = ""; state.mergePicks.clear(); state.editingPlanting = null; state.nameSuggestions = null; }
   state.selectedKey = key;
   renderPanel();
   document.querySelectorAll(".card.selected, tr.selected").forEach((el) => el.classList.remove("selected"));
@@ -3017,6 +3182,7 @@ document.addEventListener("click", async (ev) => {
     case "not-dup-member": notDupMember(Number(el.dataset.group), el.dataset.key); break;
     case "unmerge": unmerge(el.dataset.alias); break;
     case "more-dupes": state.dupLimit += 25; renderMain(); break;
+    case "suggest-names": suggestNames(el.dataset.key, el); break;
     case "count-changes": countChangeExport(); break;
     case "export-changes": runChangeExport(); break;
     case "reset-change-export": state.changeExport = { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null }; renderMain(); break;
