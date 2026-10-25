@@ -254,7 +254,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.15.0";
+const APP_VERSION = "1.16.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -270,7 +270,7 @@ const DEMO = new URLSearchParams(location.search).has("demo");
 const SOURCE_LABELS = { tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG", accession: "IrisBG accession", "wib edition": "What's in Bloom edition" };
 const PROVENANCE_LABELS = {
   tumblr: "Tumblr", website: "Plant Highlight", wib: "What's in Bloom", irisbg: "IrisBG",
-  iucn: "IUCN", manual: "typed in", derived: "derived", gbif: "GBIF",
+  iucn: "IUCN", manual: "typed in", derived: "derived", gbif: "Global Biodiversity Information Facility",
   smgrowers: "San Marcos Growers", anniesannuals: "Annie's Annuals", floragrubb: "Flora Grubb",
   waltzingmatilija: "Waltzing Matilija", crescenthill: "Crescent Hill Nursery",
 };
@@ -1470,13 +1470,14 @@ function renderNameCheck(p) {
   return `<div class="section"><div class="row-between"><h3>Name check</h3><span class="pill ${st.tone}">${esc(st.label)}</span></div>
     ${m ? `<div class="kv" style="margin-top:6px">
         ${accepted ? `<div class="k">Accepted name</div><div><strong>${esc(accepted)}</strong></div>` : ""}
-        <div class="k">GBIF matched</div><div>${esc(m.canonical_name || "—")} <span class="faint">(${esc(m.matched_as)}${m.match_type ? `, ${esc(m.match_type.toLowerCase())}` : ""}${m.confidence ? `, confidence ${m.confidence}` : ""})</span></div>
+        <div class="k">Matched name</div><div>${esc(m.canonical_name || "—")} <span class="faint">(${esc(m.matched_as)}${m.match_type ? `, ${esc(m.match_type.toLowerCase())}` : ""}${m.confidence ? `, confidence ${m.confidence}` : ""})</span></div>
         ${m.family ? `<div class="k">Family</div><div>${esc(m.family)}</div>` : ""}
         ${m.name_key !== p.key ? `<div class="k">From spelling</div><div class="faint">${esc(m.plant_name)}</div>` : ""}
       </div>
+      <div class="faint" style="margin-top:4px">Checked against the Global Biodiversity Information Facility, an international open database of species names.</div>
       ${m.powo_url ? `<div style="margin-top:6px"><a href="${safeUrl(m.powo_url)}" target="_blank" rel="noopener">Look it up on Plants of the World Online ↗</a></div>` : ""}`
     : `<div class="faint">No botanical check has run for this name yet.</div>`}
-    ${m && m.matched_as === "no match" ? `<div class="notice" style="margin-top:8px">Nothing in the botanical backbone matches this name, even after dropping cultivars and notes — usually a spelling to fix.
+    ${m && m.matched_as === "no match" ? `<div class="notice" style="margin-top:8px">Nothing in the Global Biodiversity Information Facility matches this name, even after dropping cultivars and notes — usually a spelling to fix.
       <button class="btn small" data-action="suggest-names" data-key="${attr(p.key)}">Find near spellings</button></div>` : ""}
     ${sugg ? (sugg.error ? `<div class="notice bad">${esc(sugg.error)}</div>`
       : sugg.rows.length ? `<div class="box" style="margin-top:6px"><div class="faint">Nursery catalogues spell it like this:</div>
@@ -2479,7 +2480,7 @@ const CLEANUP_GROUPS = [
   { title: "Names", checks: [
     { id: "name-nomatch", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", fix: "Usually a spelling. Open the plant and use “Find near spellings” under Name check, then merge it with the right spelling." },
     { id: "duplicates", label: "Possible duplicate names", dupes: true, fix: "Untick any name that isn't the same plant, choose the name to keep, then merge. Merging never changes a source record." },
-    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), fix: "GBIF knows a currently accepted name. Check the nursery catalogues before renaming — the trade often keeps the old name." },
+    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), fix: "The Global Biodiversity Information Facility lists a currently accepted name. Check the nursery catalogues before renaming — the trade often keeps the old name." },
     { id: "name-genus-only", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", fix: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
     { id: "no-reference", label: "In no nursery catalogue", test: (p) => !p.references.length, fix: "Expected for rare collection plants, suspicious for a common one — often a spelling the nurseries don't use." },
   ] },
