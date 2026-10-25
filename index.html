@@ -249,7 +249,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.14.0";
+const APP_VERSION = "1.14.1";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -943,6 +943,10 @@ function buildIndex() {
   // made while the taxon row pointed at the alias.
   for (const t of d.taxa) {
     const key = resolve(t.name_key);
+    // With IrisBG off, a curated record whose only sources are IrisBG has
+    // no plant here yet -- leave it out rather than create one, or it shows
+    // up with no sources at all (v1.14.1).
+    if (!iris && !idx.plants.has(key)) continue;
     const p = idx.plants.get(key) || plantFor(t.name_key);
     p.taxon = t;
   }
