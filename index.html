@@ -242,8 +242,8 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.11.0";
-const APP_UPDATED = "2026-09-18";
+const APP_VERSION = "1.12.0";
+const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
@@ -315,7 +315,8 @@ const state = {
   me: null,               // own staff row, or null when not on the list
   phase: "boot",          // boot | login | setpassword | notstaff | loading | ready | error
   notice: null,           // one-off message on the login screen
-  pendingPassword: false, // arrived on an invite or password-reset link
+  pendingPassword: false, // arrived on an invite or password-reset link, or signed in with a temp password
+  tempPassword: null,     // { email, password } just issued under Admin -> Staff; shown once, never stored
   error: null,
   data: Object.fromEntries(TABLES.map((t) => [t, []])),
   idx: null,              // derived plant index, rebuilt by buildIndex()
@@ -506,8 +507,9 @@ async function requestPasswordReset() {
   render();
 }
 
-// After an invite or reset link: the tokens are already in hand, so this
-// just sets the password and carries on into the app.
+// After an invite or reset link, or a first sign-in with a temporary
+// password: the tokens are already in hand, so this just sets the password
+// and carries on into the app.
 async function setPassword(form) {
   const f = new FormData(form);
   const pw = String(f.get("password") || "");
@@ -518,10 +520,15 @@ async function setPassword(form) {
   if (status) status.textContent = "Saving…";
   try {
     const res = await authedFetch(`${CONFIG.SUPABASE_URL}/auth/v1/user`, {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }),
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw, data: { must_change_password: false } }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.msg || data.error_description || data.message || "Couldn't set the password.");
+    // The access token still carries must_change_password: true until it is
+    // reissued, and boot() reads the flag from it -- refresh first or this
+    // screen comes straight back.
+    await forceRefreshSession();
     state.pendingPassword = false;
     state.notice = null;
     toast("Password set. You're signed in.");
@@ -3351,12 +3358,19 @@ async function deleteOption(list, value) {
 
 function renderStaff() {
   const list = [...state.data.staff].sort((a, b) => a.email.localeCompare(b.email));
-  return `<p class="muted">People on this list can sign in — with Google, or with a password once they've accepted an invitation. Adding someone here doesn't email them; use Invite.</p>
+  const tp = state.tempPassword;
+  return `<p class="muted">People on this list can sign in — with Google, or with a password once they've accepted an invitation. Adding someone here doesn't email them; use Invite. If the invite email goes missing, use Temp password and give it to them yourself — they'll be asked to choose their own when they first sign in.</p>
+    ${tp ? `<div class="box tinted"><strong>Temporary password for ${esc(tp.email)}:</strong>
+      <code style="font-size:1.15em;margin:0 8px;user-select:all">${esc(tp.password)}</code>
+      <button class="btn small" data-action="copy-temp-password">Copy</button>
+      <button class="btn small" data-action="dismiss-temp-password">Done</button>
+      <div class="faint" style="margin-top:6px">Shown once. Any earlier password for this account no longer works.</div></div>` : ""}
     <div class="table-wrap"><table class="sheet"><thead><tr><th>Email</th><th>Name</th><th>Admin</th><th>Added</th><th></th></tr></thead><tbody>
     ${list.map((s) => `<tr><td>${esc(s.email)}</td><td>${esc(s.display_name || "")}</td>
       <td><input type="checkbox" data-action="toggle-admin" data-email="${attr(s.email)}" ${s.is_admin ? "checked" : ""} ${s.email === state.me.email ? "disabled title='You can’t change your own admin role'" : ""}></td>
       <td class="faint">${esc(fmtDate(s.added_at))}${s.added_by ? ` by ${esc(shortEmail(s.added_by))}` : ""}</td>
       <td style="white-space:nowrap"><button class="btn small" data-action="invite-staff" data-email="${attr(s.email)}">Invite</button>
+        ${s.email === state.me.email ? "" : ` <button class="btn small" data-action="temp-password" data-email="${attr(s.email)}">Temp password</button>`}
         ${s.email === state.me.email ? "" : ` <button class="btn small danger" data-action="remove-staff" data-email="${attr(s.email)}">Remove</button>`}</td></tr>`).join("")}
     </tbody></table></div>
     <form id="add-staff" class="box" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -3384,6 +3398,30 @@ async function inviteStaff(email, btn) {
     toast(`Couldn't invite ${email}: ${e.message}`, true);
   }
   if (btn) { btn.disabled = false; btn.textContent = "Invite"; }
+}
+
+// For when the invite email lands in spam: the Edge Function sets a random
+// password with no email at all, and flags the account so the person must
+// choose their own on first sign-in. The password is shown to the admin
+// once and kept only in memory.
+async function issueTempPassword(email, btn) {
+  if (DEMO) { toast("Demo mode has no accounts."); return; }
+  if (!confirmAction(`Set a temporary password for ${email}? Any password they already have will stop working.`)) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Setting…"; }
+  try {
+    const res = await authedFetch(`${CONFIG.SUPABASE_URL}/functions/v1/invite-staff`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, mode: "temp_password" }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error || !data.password) throw new Error(data.error || `HTTP ${res.status}`);
+    state.tempPassword = { email, password: data.password };
+    renderMain();
+    return;
+  } catch (e) {
+    toast(`Couldn't set a password for ${email}: ${e.message}`, true);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "Temp password"; }
 }
 
 async function addStaff(form) {
@@ -3428,6 +3466,11 @@ document.addEventListener("click", async (ev) => {
     case "sign-in": signInWithProvider(el.dataset.provider || "google"); break;
     case "forgot-password": requestPasswordReset(); break;
     case "invite-staff": inviteStaff(el.dataset.email, el); break;
+    case "temp-password": issueTempPassword(el.dataset.email, el); break;
+    case "copy-temp-password":
+      navigator.clipboard.writeText(state.tempPassword?.password || "").then(() => toast("Copied."), () => toast("Couldn't copy — select it and copy by hand.", true));
+      break;
+    case "dismiss-temp-password": state.tempPassword = null; renderMain(); break;
     case "sign-out": signOut(); break;
     case "retry": boot(); break;
     case "view": state.view = el.dataset.view; render(); window.scrollTo(0, 0); break;
@@ -3605,6 +3648,10 @@ async function boot() {
   // them choose a password before anything else, or they can never sign in
   // again without another email.
   if (redirect && (redirect.type === "invite" || redirect.type === "recovery")) state.pendingPassword = true;
+  // Same for a temporary password an admin issued (invite-staff, mode
+  // temp_password). The flag rides in the JWT's user_metadata, so it holds
+  // across reloads until setPassword clears it.
+  if (decodeJwt(state.session.access_token).user_metadata?.must_change_password) state.pendingPassword = true;
   if (state.pendingPassword) { state.phase = "setpassword"; render(); return; }
   try {
     await ensureFreshSession();
