@@ -195,7 +195,6 @@ table.combine label { display: block; cursor: pointer; }
 .check .t { font-weight: 600; }
 .check .fix { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
 .cleanup-list { margin: 0 0 18px 12px; }
-.nav .iris-toggle { color: rgba(246, 242, 233, 0.75); font-size: 12px; align-self: center; white-space: nowrap; padding-right: 12px; display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
 .dash-h { font-family: var(--serif); font-size: 17px; margin: 18px 0 4px; }
 .page-title { font-family: var(--serif); font-size: 24px; margin: 0 0 4px; }
 .notice { background: var(--gold-soft); color: var(--gold); padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
@@ -250,13 +249,9 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.13.0";
+const APP_VERSION = "1.14.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
-// Per person, per browser: a viewing preference, not shared state.
-const IRIS_KEY = "rbgpcm_include_irisbg";
-function loadIncludeIris() { try { return localStorage.getItem(IRIS_KEY) !== "0"; } catch (e) { return true; } }
-function saveIncludeIris(on) { try { localStorage.setItem(IRIS_KEY, on ? "1" : "0"); } catch (e) {} }
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
 const GALLERY_PAGE = 60;
@@ -297,7 +292,7 @@ function sourceOptions() {
 const TABLES = [
   "source_records", "name_merges", "not_duplicates", "staff", "taxa", "accessions", "plantings",
   "garden_locations", "list_options", "wib_editions", "wib_appearances", "irisbg_imports",
-  "taxon_matches", "reference_names_used", "archived_names",
+  "taxon_matches", "reference_names_used", "archived_names", "app_settings",
 ];
 // Outside-world reference data (sql/005). Neither has an id column, so the
 // id-based incremental sync can't be used; instead the app asks for the
@@ -310,7 +305,7 @@ const TABLE_ORDER = {
   source_records: "id", name_merges: "alias_key", not_duplicates: "key_a,key_b", staff: "email", taxa: "id",
   accessions: "id", plantings: "id", garden_locations: "code", list_options: "list,sort,value",
   wib_editions: "id", wib_appearances: "edition_id,plant_name", irisbg_imports: "id",
-  taxon_matches: "name_key", reference_names_used: "source,source_id", archived_names: "name_key",
+  taxon_matches: "name_key", reference_names_used: "source,source_id", archived_names: "name_key", app_settings: "key",
 };
 // Why a name stopped being treated as a plant. The first three are bad
 // data (mostly the What's in Bloom PDF reader mistaking page furniture for
@@ -348,7 +343,7 @@ const state = {
   nameSuggestions: null,  // {key, rows} from suggest_reference_names()
   // Change-history export (Admin). Nothing is held here but the filters.
   changeExport: { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null },
-  includeIris: loadIncludeIris(), // false = the app as if IrisBG had never been imported (v1.13.0)
+  includeIris: true,      // app_settings.include_irisbg, copied in by buildIndex(); false = as if IrisBG had never been imported
   homeStatus: "",         // Curator records: "" | none | progress | complete
   homeMoreFilters: false,
   dashLimit: 100,
@@ -884,6 +879,12 @@ function firstWord(name) {
   return w.replace(/[^A-Za-z\-]/g, "");
 }
 
+// Garden-wide switches (sql/009). A missing row means the default.
+function appSetting(key, fallback) {
+  const row = (state.data.app_settings || []).find((r) => r.key === key);
+  return row ? row.value : fallback;
+}
+
 function buildIndex() {
   const d = state.data;
   const mergeMap = new Map(d.name_merges.map((m) => [m.alias_key, m]));
@@ -911,6 +912,7 @@ function buildIndex() {
   // count, gap and duplicate suggestion downstream is IrisBG-free without
   // each having to know. Plantings still hang off their accessions
   // (Garden locations reads them), they just aren't attached to plants.
+  state.includeIris = appSetting("include_irisbg", true) !== false;
   const iris = state.includeIris;
   for (const r of d.source_records) {
     if (!iris && r.source === "irisbg") continue;
@@ -1112,9 +1114,7 @@ function renderNav() {
   if (state.me?.is_admin) items.push(["admin", "Admin", null]);
   return `<nav class="nav">${items.map(([v, label, n]) =>
     `<button class="${state.view === v ? "active" : ""}" data-action="view" data-view="${v}">${label}${n != null ? `<span class="count">${n.toLocaleString()}</span>` : ""}</button>`).join("")}
-    <span class="spacer"></span>
-    <label class="iris-toggle" title="Off: the app shows only Tumblr, Plant Highlights and What's in Bloom, as if IrisBG had never been imported. Remembered on this computer."><input type="checkbox" id="iris-toggle" ${state.includeIris ? "checked" : ""}> Include IrisBG</label>
-    <span class="synced">Data synced ${esc(fmtDateTime(syncedAt()) || "—")}</span></nav>`;
+    <span class="spacer"></span><span class="synced">Data synced ${esc(fmtDateTime(syncedAt()) || "—")}</span></nav>`;
 }
 
 function renderMain() {
@@ -1913,7 +1913,7 @@ function toLocalInput(iso) {
 }
 
 function renderAccessionsSection(p) {
-  if (!state.includeIris) return `<div class="section"><h3>Accessions</h3><div class="faint">IrisBG is switched off — tick “Include IrisBG” in the bar at the top to see accessions and plantings.</div></div>`;
+  if (!state.includeIris) return `<div class="section"><h3>Accessions</h3><div class="faint">IrisBG is switched off for the app — an admin can turn it back on under Admin → App Settings.</div></div>`;
   if (!p.accessions.length) {
     return `<div class="section"><h3>Accessions</h3><div class="empty">${state.data.irisbg_imports.length ? "No IrisBG accession under this name." : "No IrisBG export loaded yet."}</div></div>`;
   }
@@ -3432,7 +3432,12 @@ function renderAppSettings() {
   for (const g of state.data.garden_locations) codes.add(g.code);
   const unnamed = [...codes].filter((c) => !locationName(c)).length;
   const locSummary = codes.size ? `${plural(codes.size, "location code")} from IrisBG · ${unnamed} still need a name` : "Codes appear after the first IrisBG import";
-  return `<h2 class="dash-h">Picklists</h2>
+  const irisOn = state.includeIris;
+  return `<h2 class="dash-h">Data sources</h2>
+    <div class="box"><label class="row-between" style="cursor:pointer;gap:12px"><div><h3 style="font-family:var(--serif);margin:0">Include IrisBG</h3>
+      <div class="faint" style="margin-top:2px">${irisOn ? "On" : "Off"} for everyone. Off, the app shows only Tumblr, Plant Highlights and What's in Bloom, as if IrisBG had never been imported — nothing is deleted, and turning it back on brings everything back.</div></div>
+      <input type="checkbox" id="iris-toggle" ${irisOn ? "checked" : ""}></label></div>
+    <h2 class="dash-h">Picklists</h2>
     <p class="muted" style="margin-top:0">The choices offered on the Curated tab.</p>${lists}
     <h2 class="dash-h">Garden locations</h2>
     ${row("locations", "Bed and area names", locSummary, () => renderLocations(true))}`;
@@ -3574,6 +3579,30 @@ async function addStaff(form) {
     await reloadTables("staff"); renderMain();
     toast(`${email} added. Click Invite to email them a set-password link.`);
   } catch (e) { toast(`Couldn't add: ${e.message}`, true); }
+}
+
+// Admin -> App Settings. Shared by every staff member (app_settings row),
+// so it is saved first and only then applied; other people pick it up on
+// their next load.
+async function setIncludeIris(input) {
+  const on = input.checked;
+  input.disabled = true;
+  try {
+    await db.insert("app_settings", [{ key: "include_irisbg", value: on, updated_by: state.me.email, updated_at: new Date().toISOString() }], { onConflict: "key", returning: false });
+    await reloadTables("app_settings");
+  } catch (e) {
+    toast(`Couldn't change the IrisBG setting: ${e.message}`, true);
+    input.checked = !on; input.disabled = false;
+    return;
+  }
+  // The open plant may have been IrisBG-only.
+  if (state.selectedKey && !state.idx.list.some((p) => p.key === state.selectedKey)) state.selectedKey = null;
+  state.dashFilters = { ...state.dashFilters, source: state.dashFilters.source === "irisbg" ? "" : state.dashFilters.source, location: "", accession: "", gps: "" };
+  if (state.browse.source === "irisbg") state.browse.source = "";
+  if (state.browse.gap === "accession") state.browse.gap = "";
+  if (state.dashFilters.gap === "accession") state.dashFilters.gap = "";
+  toast(on ? "IrisBG is on for everyone." : "IrisBG is off for everyone.");
+  render();
 }
 
 /* ==================== EVENTS ====================
@@ -3723,16 +3752,7 @@ document.addEventListener("input", (ev) => {
 document.addEventListener("change", (ev) => {
   const t = ev.target;
   if (t.id === "iris-toggle") {
-    state.includeIris = t.checked;
-    saveIncludeIris(t.checked);
-    buildIndex();
-    // The open plant may have been IrisBG-only.
-    if (state.selectedKey && !state.idx.list.some((p) => p.key === state.selectedKey)) state.selectedKey = null;
-    state.dashFilters = { ...state.dashFilters, source: state.dashFilters.source === "irisbg" ? "" : state.dashFilters.source, location: "", accession: "", gps: "" };
-    if (state.browse.source === "irisbg") state.browse.source = "";
-    if (state.browse.gap === "accession") state.browse.gap = "";
-    if (state.dashFilters.gap === "accession") state.dashFilters.gap = "";
-    render();
+    setIncludeIris(t);
   } else if (t.dataset.dashf) {
     state.dashFilters[t.dataset.dashf] = t.value;
     state.dashLimit = 100;
