@@ -156,6 +156,12 @@ table.sheet .name { font-family: var(--serif); font-weight: 600; }
 .section h3 { font-family: var(--serif); font-size: 16px; margin: 0 0 10px; font-weight: 600; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
 .section .row-between h3 { border-bottom: 0; padding-bottom: 0; }
 .section > .row-between:first-child { border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 10px; }
+.main-photo img { width: 100%; max-height: 380px; object-fit: contain; background: var(--cream); border-radius: 8px; display: block; cursor: zoom-in; }
+.photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.photo-tile { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--paper); }
+.photo-tile.main { outline: 3px solid var(--forest); }
+.photo-tile img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; display: block; cursor: zoom-in; }
+.photo-tile .cap { font-size: 12px; color: var(--ink-soft); margin: 6px 0; }
 /* Full-page record: the record on the left, its reference material on the right. */
 .record-split { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 18px; align-items: start; }
 .record-side { background: var(--cream); border-radius: 12px; padding: 12px; }
@@ -270,7 +276,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.19.0";
+const APP_VERSION = "1.20.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -1041,7 +1047,8 @@ function finalizePlant(p, canonicalNames) {
   p.genus = (p.taxon && p.taxon.genus) || firstWord(p.displayName);
   p.family = (p.taxon && p.taxon.family) || "";
   const photoRec = p.tumblr.find((r) => r.photo_url) || p.website.find((r) => r.photo_url);
-  p.photo = photoRec ? photoRec.photo_url : null;
+  // A main photo chosen on the Photos tab wins; otherwise the first published one.
+  p.photo = (p.taxon && p.taxon.main_photo_url) || (photoRec ? photoRec.photo_url : null);
   const descRec = p.tumblr.find((r) => !blank(r.description)) || p.website.find((r) => !blank(r.description));
   p.description = descRec ? descRec.description : "";
   p.hasWib = p.wib.length > 0 || p.appearances.length > 0;
@@ -1286,12 +1293,12 @@ function renderPanel() {
   if (!p) { panel.hidden = true; return; }
   panel.hidden = false;
   const tabs = [
-    ["curated", "Curated"], ["tumblr", `Tumblr${p.tumblr.length ? ` (${p.tumblr.length})` : ""}`],
+    ["curated", "Curated"], ["photos", `Photos${plantPhotos(p).length ? ` (${plantPhotos(p).length})` : ""}`], ["tumblr", `Tumblr${p.tumblr.length ? ` (${p.tumblr.length})` : ""}`],
     ["highlight", "Plant Highlight"], ["wib", "What's in Bloom"], ["irisbg", `IrisBG${p.irisbg.length ? ` (${p.irisbg.length})` : ""}`],
   ];
   if (!state.includeIris) tabs.splice(tabs.findIndex(([t]) => t === "irisbg"), 1);
   if (!state.includeIris && state.tab === "irisbg") state.tab = "curated";
-  const bodies = { curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab };
+  const bodies = { photos: renderPhotosTab, curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab };
   panel.innerHTML = `<div class="panel-head">
       <div class="row-between" style="align-items:flex-start">
         <div><h2>${esc(p.displayName)}</h2>
@@ -1324,6 +1331,64 @@ function renderTumblrTab(p) {
       <div style="margin-top:6px"><a href="${safeUrl(r.link)}" target="_blank" rel="noopener">Open on Tumblr ↗</a>
       ${r.details && r.details.website_link ? ` · <a href="${safeUrl(r.details.website_link)}" target="_blank" rel="noopener">Matching Plant Highlight ↗</a>` : ""}</div>
     </div>`).join("");
+}
+
+/* ---------- photos ----------
+   Every photo the garden has published for the plant, gathered from its
+   sources. The curator picks one as the main photo (taxa.main_photo_url,
+   sql/011); it heads the Curated tab and the Browse card. Nursery photos
+   are deliberately absent: they are linked, never shown (copyright). */
+function plantPhotos(p) {
+  const out = [];
+  const seen = new Set();
+  const add = (url, source, caption, link) => { if (url && !seen.has(url)) { seen.add(url); out.push({ url, source, caption, link }); } };
+  for (const r of p.tumblr) {
+    const when = fmtDate(r.posted_at);
+    add(r.photo_url, "Tumblr", when, r.link);
+    add(r.detail_photo_url, "Tumblr", `${when ? `${when} · ` : ""}detail`, r.link);
+  }
+  for (const r of p.website) {
+    add(r.photo_url, "Plant Highlight", r.details?.date_label || "", r.link);
+    add(r.detail_photo_url, "Plant Highlight", `${r.details?.date_label ? `${r.details.date_label} · ` : ""}detail`, r.link);
+  }
+  const main = p.taxon && p.taxon.main_photo_url;
+  if (main && !seen.has(main)) out.unshift({ url: main, source: "Chosen earlier", caption: "no longer in a source", link: null });
+  return out;
+}
+
+function renderMainPhoto(p) {
+  const photos = plantPhotos(p);
+  if (!photos.length) return `<div class="section main-photo"><h3>Main photo</h3><div class="faint">No photos yet for this plant.</div></div>`;
+  const chosen = p.taxon && p.taxon.main_photo_url;
+  const ph = photos.find((x) => x.url === p.photo) || photos[0];
+  return `<div class="section main-photo"><div class="row-between"><h3>Main photo</h3>
+      <button class="btn small" data-action="tab" data-tab="photos">${chosen ? "Change" : "Choose"} (${photos.length})</button></div>
+    <img src="${attr(ph.url)}" alt="" referrerpolicy="no-referrer" data-action="lightbox" data-src="${attr(ph.url)}">
+    <div class="faint" style="margin-top:4px">${esc([ph.source, ph.caption].filter(Boolean).join(" · "))}${chosen ? "" : " — not chosen yet; showing the first published photo"}</div></div>`;
+}
+
+function renderPhotosTab(p) {
+  const photos = plantPhotos(p);
+  if (!photos.length) return `<div class="empty">No photos for this plant yet. Photos come from its Tumblr posts and Plant Highlight; uploading your own is coming.</div>`;
+  const chosen = p.taxon && p.taxon.main_photo_url;
+  return `${p.taxon ? "" : `<div class="notice">Save the curated record first (Curated tab) — the main photo is kept on it.</div>`}
+    <div class="photo-grid">${photos.map((ph) => `<div class="photo-tile ${ph.url === chosen ? "main" : ""}">
+      <img src="${attr(ph.url)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-action="lightbox" data-src="${attr(ph.url)}">
+      <div class="cap">${esc(ph.source)}${ph.caption ? ` · ${esc(ph.caption)}` : ""}${ph.link ? ` · <a href="${safeUrl(ph.link)}" target="_blank" rel="noopener">post ↗</a>` : ""}</div>
+      ${ph.url === chosen ? `<span class="pill sage">Main photo</span> <button class="btn small link" data-action="clear-main-photo">Unset</button>`
+        : `<button class="btn small" data-action="set-main-photo" data-url="${attr(ph.url)}" ${p.taxon ? "" : "disabled"}>Make main photo</button>`}
+    </div>`).join("")}</div>`;
+}
+
+async function setMainPhoto(url) {
+  const p = selectedPlant();
+  if (!p || !p.taxon) return;
+  try {
+    await db.update("taxa", { id: p.taxon.id }, { main_photo_url: url });
+    await reloadTables("taxa");
+    toast(url ? "Main photo set." : "Main photo unset.");
+    renderPanel(); renderMain();
+  } catch (e) { toast(`Couldn't set the main photo: ${e.message}`, true); }
 }
 
 function renderHighlightTab(p) {
@@ -1870,6 +1935,7 @@ function renderCuratedTab(p) {
   const full = isFullRecord();
   if (p.archived) return full ? renderArchiveBox(p) : `${renderArchiveBox(p)}${renderNameCheck(p)}`;
   return `${full ? "" : `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}`}
+    ${renderMainPhoto(p)}
     <div class="section"><div class="row-between"><h3>Curated record</h3>
       <span class="faint">${p.taxon ? `Last edited ${esc(fmtDate(t.updated_at))}${t.updated_by ? ` by ${esc(shortEmail(t.updated_by))}` : ""}` : "Not curated yet — saving creates the record"}</span></div>
       <form id="curated-form" data-key="${attr(p.key)}" autocomplete="off">${rows.join("")}
@@ -3802,6 +3868,8 @@ document.addEventListener("click", async (ev) => {
       break;
     }
     case "tab": state.tab = el.dataset.tab; renderPanel(); break;
+    case "set-main-photo": setMainPhoto(el.dataset.url); break;
+    case "clear-main-photo": setMainPhoto(null); break;
     case "lightbox": openLightbox(el.dataset.src); break;
     case "close-lightbox": document.getElementById("overlay").innerHTML = ""; break;
     case "use-sugg": useSuggestion(el); break;
