@@ -261,7 +261,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.17.0";
+const APP_VERSION = "1.18.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -304,7 +304,7 @@ function sourceOptions() {
 const TABLES = [
   "source_records", "name_merges", "not_duplicates", "staff", "taxa", "accessions", "plantings",
   "garden_locations", "list_options", "wib_editions", "wib_appearances", "irisbg_imports",
-  "taxon_matches", "reference_names_used", "archived_names", "app_settings",
+  "taxon_matches", "reference_names_used", "archived_names", "app_settings", "reference_sources",
 ];
 // Outside-world reference data (sql/005). Neither has an id column, so the
 // id-based incremental sync can't be used; instead the app asks for the
@@ -317,7 +317,7 @@ const TABLE_ORDER = {
   source_records: "id", name_merges: "alias_key", not_duplicates: "key_a,key_b", staff: "email", taxa: "id",
   accessions: "id", plantings: "id", garden_locations: "code", list_options: "list,sort,value",
   wib_editions: "id", wib_appearances: "edition_id,plant_name", irisbg_imports: "id",
-  taxon_matches: "name_key", reference_names_used: "source,source_id", archived_names: "name_key", app_settings: "key",
+  taxon_matches: "name_key", reference_names_used: "source,source_id", archived_names: "name_key", app_settings: "key", reference_sources: "source",
 };
 // Why a name stopped being treated as a plant. The first three are bad
 // data (mostly the What's in Bloom PDF reader mistaking page furniture for
@@ -382,6 +382,8 @@ function attr(v) { return escapeHtml(v); }
 function safeUrl(v) { return /^https?:\/\//i.test(String(v || "")) ? attr(v) : "#"; }
 function blank(v) { return v == null || (typeof v === "string" && v.trim() === ""); }
 function norm(v) { return blank(v) ? null : String(v).trim(); }
+// "a, b and c"
+function listJoin(items) { return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`; }
 function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + "s")}`; }
 function fmtDate(iso) {
   if (!iso) return "";
@@ -891,6 +893,22 @@ function firstWord(name) {
   return w.replace(/[^A-Za-z\-]/g, "");
 }
 
+// Outside lookup sources an admin has approved (sql/010). Until that table
+// has rows, everything counts as approved -- the behaviour before it existed.
+function sourceApproved(src) {
+  const rows = state.data.reference_sources || [];
+  if (!rows.length) return true;
+  const r = rows.find((x) => x.source === src);
+  return !!r && r.status === "approved";
+}
+function sourceLabel(src) {
+  const r = (state.data.reference_sources || []).find((x) => x.source === src);
+  return (r && r.label) || NURSERY_LABELS[src] || src;
+}
+function approvedNurseries() {
+  return Object.keys(NURSERY_LABELS).filter(sourceApproved).map((k) => [k, sourceLabel(k)]);
+}
+
 // Garden-wide switches (sql/009). A missing row means the default.
 function appSetting(key, fallback) {
   const row = (state.data.app_settings || []).find((r) => r.key === key);
@@ -972,13 +990,17 @@ function buildIndex() {
     if (!refsByKey.has(r.name_key)) refsByKey.set(r.name_key, []);
     refsByKey.get(r.name_key).push(r);
   }
+  const gbifOn = sourceApproved("gbif");
   const MATCH_RANK = { "as written": 0, "without cultivar": 1, "without notes": 2, "genus + species only": 3, "genus only": 4, "no match": 5 };
   for (const p of idx.plants.values()) {
     const keys = [p.key, ...p.spellings.keys()];
     p.matches = [...new Set(keys)].map((k) => matchByKey.get(k)).filter(Boolean)
       .sort((a, b) => (MATCH_RANK[a.matched_as] ?? 9) - (MATCH_RANK[b.matched_as] ?? 9) || (b.confidence || 0) - (a.confidence || 0));
+    // A source switched off under App Settings -> Lookup sources simply
+    // doesn't reach the plant, so suggestions, filters and checks all drop it.
+    if (!gbifOn) p.matches = [];
     p.match = p.matches[0] || null;
-    p.references = [...new Set(keys)].flatMap((k) => refsByKey.get(k) || []);
+    p.references = [...new Set(keys)].flatMap((k) => refsByKey.get(k) || []).filter((r) => sourceApproved(r.source));
   }
 
   const canonicalNames = new Map([...mergeMap.values()].map((m) => [m.canonical_key, m.canonical_name]));
@@ -1425,7 +1447,7 @@ async function suggestNames(key, btn) {
       body: JSON.stringify({ q: p.displayName, n: 6 }),
     });
     if (!res.ok) throw await pgError(res);
-    state.nameSuggestions = { key, rows: await res.json() };
+    state.nameSuggestions = { key, rows: (await res.json()).filter((r) => sourceApproved(r.source)) };
   } catch (e) {
     state.nameSuggestions = { key, rows: [], error: e.message };
   }
@@ -1492,20 +1514,20 @@ function renderNameCheck(p) {
       </div>
       <div class="faint" style="margin-top:4px">Checked against the Global Biodiversity Information Facility, an international open database of species names.</div>
       ${m.powo_url ? `<div style="margin-top:6px"><a href="${safeUrl(m.powo_url)}" target="_blank" rel="noopener">Look it up on Plants of the World Online ↗</a></div>` : ""}`
-    : `<div class="faint">No botanical check has run for this name yet.</div>`}
+    : `<div class="faint">${sourceApproved("gbif") ? "No botanical check has run for this name yet." : "Botanical name checking is switched off under Admin → App Settings → Lookup sources."}</div>`}
     ${m && m.matched_as === "no match" ? `<div class="notice" style="margin-top:8px">Nothing in the Global Biodiversity Information Facility matches this name, even after dropping cultivars and notes — usually a spelling to fix.
       <button class="btn small" data-action="suggest-names" data-key="${attr(p.key)}">Find near spellings</button></div>` : ""}
     ${sugg ? (sugg.error ? `<div class="notice bad">${esc(sugg.error)}</div>`
       : sugg.rows.length ? `<div class="box" style="margin-top:6px"><div class="faint">Nursery catalogues spell it like this:</div>
-          ${sugg.rows.map((r) => `<div><a href="${safeUrl(r.url)}" target="_blank" rel="noopener">${esc(r.plant_name)}</a> <span class="faint">${esc(NURSERY_LABELS[r.source] || r.source)}</span></div>`).join("")}</div>`
+          ${sugg.rows.map((r) => `<div><a href="${safeUrl(r.url)}" target="_blank" rel="noopener">${esc(r.plant_name)}</a> <span class="faint">${esc(sourceLabel(r.source))}</span></div>`).join("")}</div>`
         : `<div class="faint" style="margin-top:6px">No near spelling in any nursery catalogue either.</div>`) : ""}
     <div style="margin-top:8px"><div class="k faint">In nursery catalogues (${refs.length})</div>
       ${refs.length ? refs.map((r) => `<div class="row-between" style="gap:8px">
           <div><a href="${safeUrl(r.url)}" target="_blank" rel="noopener">${esc(r.plant_name)}</a>
-            <span class="faint">${esc(NURSERY_LABELS[r.source] || r.source)}${r.facts?.common_name ? ` · ${esc(r.facts.common_name)}` : ""}</span></div>
+            <span class="faint">${esc(sourceLabel(r.source))}${r.facts?.common_name ? ` · ${esc(r.facts.common_name)}` : ""}</span></div>
           ${r.photo_url ? `<a class="faint" href="${safeUrl(r.photo_url)}" target="_blank" rel="noopener">their photo ↗</a>` : ""}
         </div>`).join("")
-        : `<div class="faint">Not listed by San Marcos Growers, Annie's Annuals, Flora Grubb, Waltzing Matilija or Crescent Hill.</div>`}
+        : `<div class="faint">${approvedNurseries().length ? `Not listed by ${esc(listJoin(approvedNurseries().map(([, l]) => l)))}.` : "No nursery catalogues are switched on."}</div>`}
     </div></div>`;
 }
 
@@ -2494,11 +2516,11 @@ const hasWibFacts = (r) => ["native_to", "form_size", "sun_shade", "hardy_to"].s
    items need IrisBG data and disappear while it is switched off. */
 const CLEANUP_GROUPS = [
   { title: "Names", checks: [
-    { id: "name-nomatch", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", fix: "Usually a spelling. Open the plant and use “Find near spellings” under Name check, then merge it with the right spelling." },
+    { id: "name-nomatch", needs: "gbif", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", fix: "Usually a spelling. Open the plant and use “Find near spellings” under Name check, then merge it with the right spelling." },
     { id: "duplicates", label: "Possible duplicate names", dupes: true, fix: "Untick any name that isn't the same plant, choose the name to keep, then merge. Merging never changes a source record." },
-    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), fix: "The Global Biodiversity Information Facility lists a currently accepted name. Check the nursery catalogues before renaming — the trade often keeps the old name." },
-    { id: "name-genus-only", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", fix: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
-    { id: "no-reference", label: "In no nursery catalogue", test: (p) => !p.references.length, fix: "Expected for rare collection plants, suspicious for a common one — often a spelling the nurseries don't use." },
+    { id: "name-synonym", needs: "gbif", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), fix: "The Global Biodiversity Information Facility lists a currently accepted name. Check the nursery catalogues before renaming — the trade often keeps the old name." },
+    { id: "name-genus-only", needs: "gbif", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", fix: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
+    { id: "no-reference", needs: "nursery", label: "In no nursery catalogue", test: (p) => !p.references.length, fix: "Expected for rare collection plants, suspicious for a common one — often a spelling the nurseries don't use." },
   ] },
   { title: "IrisBG", iris: true, checks: [
     { id: "not-in-export", label: "Accession missing from the latest IrisBG export", test: (p) => p.accessions.some((a) => !a.in_latest_export), fix: "The plant may have left the collection (archive the name), or IrisBG renamed it (merge the two names)." },
@@ -2519,7 +2541,8 @@ const CLEANUP_GROUPS = [
 
 function cleanupGroups() {
   return CLEANUP_GROUPS.filter((g) => !g.iris || state.includeIris)
-    .map((g) => ({ ...g, checks: g.checks.filter((c) => !c.iris || state.includeIris) }));
+    .map((g) => ({ ...g, checks: g.checks.filter((c) => (!c.iris || state.includeIris)
+      && (c.needs !== "gbif" || sourceApproved("gbif")) && (c.needs !== "nursery" || approvedNurseries().length)) }));
 }
 function findCleanupCheck(id) {
   for (const g of cleanupGroups()) for (const c of g.checks) if (c.id === id) return c;
@@ -2658,7 +2681,7 @@ function renderDashFilters() {
       ${more ? `
       <select data-dashf="gap">${optionList(activeGaps(), f.gap, "Any completeness")}</select>
       <select data-dashf="status">${optionList(BOTANICAL_STATUS, f.status, "Any name status")}</select>
-      <select data-dashf="nursery">${optionList(Object.entries(NURSERY_LABELS), f.nursery, "Any nursery")}</select>
+      <select data-dashf="nursery">${optionList(approvedNurseries(), f.nursery, "Any nursery")}</select>
       <select data-dashf="photo">${optionList(yesNo("photo"), f.photo, "Photo or not")}</select>
       <select data-dashf="description">${optionList(yesNo("description"), f.description, "Description or not")}</select>
       ${iris ? `<select data-dashf="accession">${optionList(yesNo("accession"), f.accession, "Accession or not")}</select>
@@ -3465,10 +3488,77 @@ function renderAppSettings() {
     <div class="box"><label class="row-between" style="cursor:pointer;gap:12px"><div><h3 style="font-family:var(--serif);margin:0">Include IrisBG</h3>
       <div class="faint" style="margin-top:2px">${irisOn ? "On" : "Off"} for everyone. Off, the app shows only Tumblr, Plant Highlights and What's in Bloom, as if IrisBG had never been imported — nothing is deleted, and turning it back on brings everything back.</div></div>
       <input type="checkbox" id="iris-toggle" ${irisOn ? "checked" : ""}></label></div>
+    <h2 class="dash-h">Lookup sources</h2>
+    <p class="muted" style="margin-top:0">Outside sources the name check and the Curated tab suggestions draw on. Switching one off hides its data straight away and the bot stops fetching it; nothing is deleted.</p>
+    ${renderLookupSources()}
     <h2 class="dash-h">Picklists</h2>
     <p class="muted" style="margin-top:0">The choices offered on the Curated tab.</p>${lists}
     <h2 class="dash-h">Garden locations</h2>
     ${row("locations", "Bed and area names", locSummary, () => renderLocations(true))}`;
+}
+
+const SOURCE_KIND_LABELS = { botanical: "Botanical names", nursery: "Nursery catalogue", other: "Other" };
+
+function renderLookupSources() {
+  const rows = [...(state.data.reference_sources || [])];
+  if (!rows.length) return `<div class="empty">The lookup sources list hasn't been set up yet (sql/010).</div>`;
+  const rank = { botanical: 0, nursery: 1, other: 2 };
+  const live = rows.filter((r) => r.status !== "requested").sort((a, b) => rank[a.kind] - rank[b.kind] || a.label.localeCompare(b.label));
+  const asked = rows.filter((r) => r.status === "requested").sort((a, b) => String(a.updated_at).localeCompare(String(b.updated_at)));
+  const link = (r) => (r.url ? ` · <a href="${safeUrl(r.url)}" target="_blank" rel="noopener">website ↗</a>` : "");
+  return `${live.map((r) => `<div class="box"><label class="row-between" style="cursor:pointer;gap:12px">
+      <div style="min-width:0"><h3 style="font-family:var(--serif);margin:0">${esc(r.label)} <span class="pill ${r.status === "approved" ? "sage" : ""}">${r.status === "approved" ? "On" : "Off"}</span></h3>
+        <div class="faint" style="margin-top:2px">${esc(SOURCE_KIND_LABELS[r.kind] || r.kind)} — ${esc(r.purpose || "")}${link(r)}</div></div>
+      <input type="checkbox" data-ref-source="${attr(r.source)}" ${r.status === "approved" ? "checked" : ""}></label></div>`).join("")}
+    ${asked.length ? `<h3 style="font-family:var(--serif);margin:14px 0 4px">Requested — not built yet</h3>
+      <p class="faint" style="margin-top:0">Each source needs its own reader written in the bot, so a request is a to-do for a development session.</p>
+      ${asked.map((r) => `<div class="box"><div class="row-between" style="gap:12px"><div style="min-width:0"><strong>${esc(r.label)}</strong>
+          <div class="faint">${esc(r.requested_note || "")}${link(r)} · asked by ${esc(shortEmail(r.requested_by))} ${esc(fmtDate(r.updated_at))}</div></div>
+        <button class="btn small danger" data-action="remove-ref-source" data-source="${attr(r.source)}">Remove</button></div></div>`).join("")}` : ""}
+    <form id="request-source" class="box" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <strong style="width:100%">Request a source</strong>
+      <input class="input" style="max-width:220px" name="label" placeholder="Name, e.g. World Flora Online" required>
+      <input class="input" style="max-width:240px" name="url" type="url" placeholder="Website">
+      <input class="input" style="flex:1;min-width:200px" name="note" placeholder="What it would help with">
+      <button class="btn">Request</button></form>`;
+}
+
+async function setSourceStatus(input) {
+  const source = input.dataset.refSource;
+  input.disabled = true;
+  try {
+    await db.update("reference_sources", { source }, { status: input.checked ? "approved" : "off", updated_by: state.me.email, updated_at: new Date().toISOString() });
+    await reloadTables("reference_sources");
+    if (state.dashFilters.nursery && !sourceApproved(state.dashFilters.nursery)) state.dashFilters.nursery = "";
+    toast(`${sourceLabel(source)} is ${input.checked ? "on" : "off"}.`);
+  } catch (e) {
+    input.checked = !input.checked;
+    toast(`Couldn't change ${sourceLabel(source)}: ${e.message}`, true);
+  }
+  renderMain();
+}
+
+async function requestSource(form) {
+  const f = new FormData(form);
+  const label = norm(f.get("label"));
+  if (!label) return;
+  // Slug for the key; the bot's reader for it will use the same one.
+  let source = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "source";
+  const taken = new Set((state.data.reference_sources || []).map((r) => r.source));
+  for (let n = 2; taken.has(source); n++) source = `${source.replace(/_\d+$/, "")}_${n}`;
+  try {
+    await db.insert("reference_sources", [{ source, label, kind: "other", url: norm(f.get("url")), purpose: norm(f.get("note")),
+      requested_note: norm(f.get("note")), requested_by: state.me.email, status: "requested", updated_by: state.me.email }], { returning: false });
+    await reloadTables("reference_sources");
+    toast(`${label} requested.`);
+    renderMain();
+  } catch (e) { toast(`Couldn't request it: ${e.message}`, true); }
+}
+
+async function removeSource(source) {
+  if (!confirmAction(`Remove the request for ${sourceLabel(source)}?`)) return;
+  try { await db.remove("reference_sources", { source }); await reloadTables("reference_sources"); renderMain(); }
+  catch (e) { toast(`Couldn't remove: ${e.message}`, true); }
 }
 
 function renderPicklistEditor(list) {
@@ -3718,6 +3808,7 @@ document.addEventListener("click", async (ev) => {
       state.cleanupLimit = 100; state.cleanupQ = ""; state.dupQuery = ""; state.dupLimit = 25;
       renderMain();
       break;
+    case "remove-ref-source": removeSource(el.dataset.source); break;
     case "settings-edit": state.settingsOpen = state.settingsOpen === el.dataset.key ? null : el.dataset.key; renderMain(); break;
     case "more-cleanup": state.cleanupLimit += 100; refreshCleanupRows(); break;
     case "more-dash": state.dashLimit += 100; refreshDashList(); break;
@@ -3789,6 +3880,8 @@ document.addEventListener("change", (ev) => {
   const t = ev.target;
   if (t.id === "iris-toggle") {
     setIncludeIris(t);
+  } else if (t.dataset.refSource) {
+    setSourceStatus(t);
   } else if (t.dataset.dashf) {
     state.dashFilters[t.dataset.dashf] = t.value;
     state.dashLimit = 100;
@@ -3827,6 +3920,7 @@ document.addEventListener("submit", (ev) => {
   else if (f.id === "planting-form") { ev.preventDefault(); savePlanting(f); }
   else if (f.id === "add-staff") { ev.preventDefault(); addStaff(f); }
   else if (f.dataset.addOpt) { ev.preventDefault(); addOption(f); }
+  else if (f.id === "request-source") { ev.preventDefault(); requestSource(f); }
 });
 
 document.addEventListener("keydown", (ev) => {
