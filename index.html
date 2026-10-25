@@ -188,6 +188,14 @@ table.combine label { display: block; cursor: pointer; }
 .stat .l { font-size: 12px; color: var(--ink-soft); }
 .stat.clickable { cursor: pointer; }
 .stat.active { outline: 2px solid var(--forest); }
+.home-facts { color: var(--ink-soft); font-size: 13px; margin: 0 0 12px; }
+.check { display: flex; gap: 14px; align-items: flex-start; background: var(--paper); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); margin: 8px 0; cursor: pointer; }
+.check.active { outline: 2px solid var(--forest); }
+.check .n { font-family: var(--serif); font-size: 20px; font-weight: 700; min-width: 3.2em; text-align: right; line-height: 1.2; }
+.check .t { font-weight: 600; }
+.check .fix { font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
+.cleanup-list { margin: 0 0 18px 12px; }
+.nav .iris-toggle { color: rgba(246, 242, 233, 0.75); font-size: 12px; align-self: center; white-space: nowrap; padding-right: 12px; display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
 .dash-h { font-family: var(--serif); font-size: 17px; margin: 18px 0 4px; }
 .page-title { font-family: var(--serif); font-size: 24px; margin: 0 0 4px; }
 .notice { background: var(--gold-soft); color: var(--gold); padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
@@ -242,9 +250,13 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.12.0";
+const APP_VERSION = "1.13.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
+// Per person, per browser: a viewing preference, not shared state.
+const IRIS_KEY = "rbgpcm_include_irisbg";
+function loadIncludeIris() { try { return localStorage.getItem(IRIS_KEY) !== "0"; } catch (e) { return true; } }
+function saveIncludeIris(on) { try { localStorage.setItem(IRIS_KEY, on ? "1" : "0"); } catch (e) {} }
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
 const WRITE_BATCH = 500;
 const GALLERY_PAGE = 60;
@@ -275,6 +287,11 @@ const GAPS = {
   photo: "No photo", description: "No description", highlight: "No Plant Highlight", wib: "No What's in Bloom data",
   accession: "No accession", curated: "No curated record",
 };
+// Filters and checks that only mean something with IrisBG included.
+function activeGaps() { return Object.entries(GAPS).filter(([g]) => g !== "accession" || state.includeIris); }
+function sourceOptions() {
+  return [["tumblr", "Has Tumblr"], ["website", "Has Plant Highlight"], ["wib", "Has What's in Bloom"], ...(state.includeIris ? [["irisbg", "Has IrisBG"]] : [])];
+}
 
 /* ==================== STATE ==================== */
 const TABLES = [
@@ -331,14 +348,20 @@ const state = {
   nameSuggestions: null,  // {key, rows} from suggest_reference_names()
   // Change-history export (Admin). Nothing is held here but the filters.
   changeExport: { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null },
-  dashTile: "all4",       // which dashboard number's plant list is showing
+  includeIris: loadIncludeIris(), // false = the app as if IrisBG had never been imported (v1.13.0)
+  homeStatus: "",         // Curator records: "" | none | progress | complete
+  homeMoreFilters: false,
   dashLimit: 100,
+  cleanupCheck: null,     // which Data cleanup item is open
+  cleanupLimit: 100,
+  cleanupQ: "",
   dashFilters: null,      // set from DASH_FILTER_DEFAULTS at boot
   importState: null,      // IrisBG import wizard state
   mergeQuery: "",
   mergePicks: new Set(),  // plant keys ticked in the panel's merge search
   editingPlanting: null,  // planting id being edited
   adminTab: "import",
+  settingsOpen: null,     // App Settings: the picklist key, or "locations", being edited
 };
 
 /* ==================== SMALL UTILITIES ==================== */
@@ -884,7 +907,13 @@ function buildIndex() {
     p.spellings.set(rawKey, s);
   };
 
+  // IrisBG switched off: its rows never reach the index, so every list,
+  // count, gap and duplicate suggestion downstream is IrisBG-free without
+  // each having to know. Plantings still hang off their accessions
+  // (Garden locations reads them), they just aren't attached to plants.
+  const iris = state.includeIris;
   for (const r of d.source_records) {
+    if (!iris && r.source === "irisbg") continue;
     const p = plantFor(r.name_key);
     p[r.source].push(r);
     addSpelling(p, r.name_key, r.plant_name, r.source);
@@ -895,8 +924,9 @@ function buildIndex() {
     plantingsByAcc.get(pl.accession_id).push(pl);
   }
   for (const a of d.accessions) {
-    const p = plantFor(a.name_key);
     a._plantings = (plantingsByAcc.get(a.id) || []).sort((x, y) => String(x.item_qualifier).localeCompare(String(y.item_qualifier), undefined, { numeric: true }));
+    if (!iris) continue;
+    const p = plantFor(a.name_key);
     p.accessions.push(a);
     addSpelling(p, a.name_key, a.plant_name, "accession");
   }
@@ -977,7 +1007,7 @@ function finalizePlant(p, canonicalNames) {
   if (!p.description) p.gaps.add("description");
   if (!p.highlightLink) p.gaps.add("highlight");
   if (!p.hasWib) p.gaps.add("wib");
-  if (!p.accessions.length) p.gaps.add("accession");
+  if (!p.accessions.length && state.includeIris) p.gaps.add("accession");
   if (!p.taxon) p.gaps.add("curated");
   p.missing = p.taxon ? curatedMissing(p) : null;
   p.complete = !!p.taxon && p.missing.length === 0;
@@ -1074,23 +1104,23 @@ function renderTopbar() {
 }
 
 function renderNav() {
-  const dupes = getDupes().length;
   const items = [
-    ["dashboard", "Dashboard", null],
+    ["dashboard", "Curator records", null],
     ["browse", "Browse", state.idx.list.length],
-    ["duplicates", "Possible duplicates", dupes],
-    ["locations", "Garden locations", null],
+    ["cleanup", "Data cleanup", null],
   ];
   if (state.me?.is_admin) items.push(["admin", "Admin", null]);
   return `<nav class="nav">${items.map(([v, label, n]) =>
     `<button class="${state.view === v ? "active" : ""}" data-action="view" data-view="${v}">${label}${n != null ? `<span class="count">${n.toLocaleString()}</span>` : ""}</button>`).join("")}
-    <span class="spacer"></span><span class="synced">Data synced ${esc(fmtDateTime(syncedAt()) || "—")}</span></nav>`;
+    <span class="spacer"></span>
+    <label class="iris-toggle" title="Off: the app shows only Tumblr, Plant Highlights and What's in Bloom, as if IrisBG had never been imported. Remembered on this computer."><input type="checkbox" id="iris-toggle" ${state.includeIris ? "checked" : ""}> Include IrisBG</label>
+    <span class="synced">Data synced ${esc(fmtDateTime(syncedAt()) || "—")}</span></nav>`;
 }
 
 function renderMain() {
   const el = document.getElementById("main");
   if (!el) return;
-  const views = { browse: renderBrowse, duplicates: renderDuplicates, dashboard: renderDashboard, combine: renderCombine, locations: renderLocations, admin: renderAdmin };
+  const views = { browse: renderBrowse, cleanup: renderCleanup, dashboard: renderDashboard, combine: renderCombine, locations: renderLocations, admin: renderAdmin };
   el.innerHTML = (views[state.view] || renderDashboard)() + `<footer class="foot">RBG Plant Collection Manager · v${APP_VERSION} (${APP_UPDATED})${DEMO ? " · demo mode: changes are not saved" : ""}</footer>`;
 }
 
@@ -1141,11 +1171,11 @@ function renderBrowse() {
   const families = [...familyCounts].sort((a, c) => a[0].localeCompare(c[0])).map(([f, n]) => [f, `${f} (${n})`]);
   const shown = list.slice(0, b.limit);
   return `<div class="toolbar">
-      <select data-filter="source">${optionList([["tumblr", "Has Tumblr"], ["website", "Has Plant Highlight"], ["wib", "Has What's in Bloom"], ["irisbg", "Has IrisBG"]], b.source, "All sources")}</select>
+      <select data-filter="source">${optionList(sourceOptions(), b.source, "All sources")}</select>
       <select data-filter="genus">${optionList(genera, b.genus, "All genera")}</select>
       <select data-filter="family" ${families.length ? "" : "disabled title='Families come from curated records'"}>${optionList(families, b.family, "All families")}</select>
       <select data-filter="curated">${optionList([["yes", "Curated"], ["no", "Not curated"]], b.curated, "Curated or not")}</select>
-      <select data-filter="gap">${optionList(Object.entries(GAPS), b.gap, "Any completeness")}</select>
+      <select data-filter="gap">${optionList(activeGaps(), b.gap, "Any completeness")}</select>
       <button class="btn link" data-action="reset-filters">Reset</button>
       <span class="spacer" style="flex:1"></span>
       <div class="seg"><button class="${b.mode === "gallery" ? "active" : ""}" data-action="mode" data-mode="gallery">Gallery</button><button class="${b.mode === "sheet" ? "active" : ""}" data-action="mode" data-mode="sheet">Spreadsheet</button></div>
@@ -1205,6 +1235,8 @@ function renderPanel() {
     ["curated", "Curated"], ["tumblr", `Tumblr${p.tumblr.length ? ` (${p.tumblr.length})` : ""}`],
     ["highlight", "Plant Highlight"], ["wib", "What's in Bloom"], ["irisbg", `IrisBG${p.irisbg.length ? ` (${p.irisbg.length})` : ""}`],
   ];
+  if (!state.includeIris) tabs.splice(tabs.findIndex(([t]) => t === "irisbg"), 1);
+  if (!state.includeIris && state.tab === "irisbg") state.tab = "curated";
   const bodies = { curated: renderCuratedTab, tumblr: renderTumblrTab, highlight: renderHighlightTab, wib: renderWibTab, irisbg: renderIrisTab };
   panel.innerHTML = `<div class="panel-head">
       <div class="row-between" style="align-items:flex-start">
@@ -1881,6 +1913,7 @@ function toLocalInput(iso) {
 }
 
 function renderAccessionsSection(p) {
+  if (!state.includeIris) return `<div class="section"><h3>Accessions</h3><div class="faint">IrisBG is switched off — tick “Include IrisBG” in the bar at the top to see accessions and plantings.</div></div>`;
   if (!p.accessions.length) {
     return `<div class="section"><h3>Accessions</h3><div class="empty">${state.data.irisbg_imports.length ? "No IrisBG accession under this name." : "No IrisBG export loaded yet."}</div></div>`;
   }
@@ -1967,7 +2000,7 @@ async function mergePlants(aliasKeys, keepKey) {
   const aliases = [...new Set(aliasKeys)].filter((k) => k !== keepKey).map((k) => state.idx.plants.get(k)).filter(Boolean);
   if (!keep || !aliases.length) return;
   if ([keep, ...aliases].filter((pl) => pl.taxon).length > 1) {
-    state.combine = { keepKey: keep.key, keys: [keep.key, ...aliases.map((a) => a.key)], back: state.view === "combine" ? "duplicates" : state.view };
+    state.combine = { keepKey: keep.key, keys: [keep.key, ...aliases.map((a) => a.key)], back: state.view === "combine" ? "cleanup" : state.view };
     state.view = "combine";
     render();
     window.scrollTo(0, 0);
@@ -2279,13 +2312,13 @@ function curatedClash(g) {
   return n > 1 ? `<div class="notice">${n} of these names have curated records. Merging them opens a side-by-side view to combine the records into one first.</div>` : "";
 }
 
-function renderDuplicates() {
+function renderDuplicates(embedded = false) {
   const all = getDupes();
   const q = state.dupQuery.trim().toLowerCase();
   // Keep each group's index into getDupes() -- the buttons refer to it.
   const matches = all.map((g, gi) => [g, gi]).filter(([g]) => !q || g.members.some((m) => m.haystack.includes(q)));
   const shown = matches.slice(0, state.dupLimit);
-  return `<h1 class="page-title">Possible duplicates</h1>
+  return `${embedded ? "" : `<h1 class="page-title">Possible duplicates</h1>`}
     <p class="muted">${all.length.toLocaleString()} suggested group${all.length === 1 ? "" : "s"}, strongest first. Untick any name that isn't the same plant, choose the name to keep, then merge. Merging never changes a source record — it only tells the app and the Google Sheet to treat the names as one plant, and each name can be unmerged from the plant's Curated tab.</p>
     <div class="toolbar"><input class="input" id="dup-search" type="search" placeholder="Find a group by plant name…" value="${attr(state.dupQuery)}" autocomplete="off" style="max-width:360px">
       ${q ? `<span class="muted">${plural(matches.length, "group")} match</span>` : ""}</div>
@@ -2358,7 +2391,7 @@ function renderCombine() {
   const keep = state.idx.plants.get(c.keepKey);
   const plants = c.keys.map((k) => state.idx.plants.get(k)).filter(Boolean);
   const withTaxa = plants.filter((pl) => pl.taxon).sort((a, b) => (b.key === c.keepKey) - (a.key === c.keepKey));
-  if (!keep || withTaxa.length < 2) { state.combine = null; return renderDuplicates(); }
+  if (!keep || withTaxa.length < 2) { state.combine = null; state.view = "cleanup"; return renderCleanup(); }
   const empty = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
   const rows = CURATED_FIELDS.map((field) => {
     const values = withTaxa.map((pl) => pl.taxon[field.f]);
@@ -2413,9 +2446,10 @@ async function saveCombine(form) {
 }
 
 /* ==================== DASHBOARD ====================
-   Replaced "Incomplete records" in v1.1.0. Every number is a test over
-   the derived plant index, so it costs no network and is always current
-   with merges. Clicking a number lists its plants underneath.
+   Replaced "Incomplete records" in v1.1.0; split in v1.13.0 into Curator
+   records (the home view) and Data cleanup. Every list is a test over the
+   derived plant index, so it costs no network and is always current with
+   merges.
    =================================================== */
 const GAP_FIX = {
   photo: "Add photos to the Tumblr post or Plant Highlight; the bot picks them up on its next run.",
@@ -2427,40 +2461,99 @@ const GAP_FIX = {
 };
 const hasWibFacts = (r) => ["native_to", "form_size", "sun_shade", "hardy_to"].some((k) => !blank(r.details?.[k]));
 
-const DASH_SECTIONS = [
-  { title: "Facts", tiles: [
-    { id: "total", label: "Plants", test: () => true },
-    { id: "all4", label: "In all 4 sources", test: (p) => p.sourceCount === 4, hint: "Tumblr, Plant Highlight, What's in Bloom and IrisBG." },
-    { id: "complete", label: "Complete curated records", test: (p) => p.complete, hint: "Every curated field that applies to the plant is filled in. Open one to see what's left." },
-    { id: "curated", label: "Curated records started", test: (p) => !!p.taxon },
-    { id: "photo", label: "With a picture", test: (p) => !!p.photo },
-    { id: "tumblr", label: "On Tumblr", test: (p) => p.tumblr.length > 0 },
-    { id: "highlight", label: "With a Plant Highlight", test: (p) => !!p.highlightLink },
-    { id: "wib", label: "In What's in Bloom", test: (p) => p.hasWib },
-    { id: "irisbg", label: "In IrisBG", test: (p) => p.hasIris },
+/* ---------- Data cleanup ----------
+   v1.13.0: the Exceptions and Gaps tiles became a to-do list. Each item
+   says what is wrong and how to fix it; the count is secondary, and an
+   item with nothing left drops to the "nothing to fix" line. iris: true
+   items need IrisBG data and disappear while it is switched off. */
+const CLEANUP_GROUPS = [
+  { title: "Names", checks: [
+    { id: "name-nomatch", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", fix: "Usually a spelling. Open the plant and use “Find near spellings” under Name check, then merge it with the right spelling." },
+    { id: "duplicates", label: "Possible duplicate names", dupes: true, fix: "Untick any name that isn't the same plant, choose the name to keep, then merge. Merging never changes a source record." },
+    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), fix: "GBIF knows a currently accepted name. Check the nursery catalogues before renaming — the trade often keeps the old name." },
+    { id: "name-genus-only", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", fix: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
+    { id: "no-reference", label: "In no nursery catalogue", test: (p) => !p.references.length, fix: "Expected for rare collection plants, suspicious for a common one — often a spelling the nurseries don't use." },
   ] },
-  { title: "Exceptions", tiles: [
-    { id: "complete-no-highlight", label: "Complete record, no Plant Highlight", test: (p) => p.complete && !p.highlightLink, hint: "Candidates for a new Plant Highlight." },
-    { id: "tumblr-repeat", label: "On Tumblr 2+ times", test: (p) => p.tumblr.length > 1 },
-    { id: "wib-repeat", label: "In What's in Bloom 2+ editions", test: (p) => p.appearances.length > 1 },
-    { id: "wib-no-facts", label: "In a What's in Bloom PDF, no fact values", test: (p) => p.appearances.length > 0 && !p.wib.some(hasWibFacts), hint: "The facts come from the reference sheet only, which doesn't cover these yet." },
-    { id: "gps", label: "Plantings without GPS", test: (p) => p.plantingCount > 0 && !p.hasGps, hint: "Open the plant, then Edit a planting under Accessions to add its GPS point." },
-    { id: "name-nomatch", label: "Name matches nothing botanical", test: (p) => p.match && p.match.matched_as === "no match", hint: "Usually a spelling to fix. Open the plant and use “Find near spellings” under Name check." },
-    { id: "name-synonym", label: "Name is an old synonym", test: (p) => p.match && /SYNONYM/.test(p.match.taxonomic_status || ""), hint: "GBIF knows a currently accepted name for these. Check it against the nursery catalogues before renaming — the trade often keeps the old name." },
-    { id: "name-genus-only", label: "Only the genus was recognised", test: (p) => p.match && p.match.matched_as === "genus only", hint: "Normal for cultivars and hybrids; worth a look when it happens to a plain species name." },
-    { id: "no-reference", label: "In no nursery catalogue", test: (p) => !p.references.length, hint: "Not listed by any of the five nurseries. Expected for rare collection plants, suspicious for a common one." },
+  { title: "IrisBG", iris: true, checks: [
+    { id: "not-in-export", label: "Accession missing from the latest IrisBG export", test: (p) => p.accessions.some((a) => !a.in_latest_export), fix: "The plant may have left the collection (archive the name), or IrisBG renamed it (merge the two names)." },
+    { id: "gps", label: "Plantings without GPS", test: (p) => p.plantingCount > 0 && !p.hasGps, fix: "Open the plant, then Edit a planting under Accessions to add its GPS point." },
   ] },
-  { title: "Gaps", tiles: Object.entries(GAPS).map(([g, label]) => ({ id: `gap-${g}`, label, test: (p) => p.gaps.has(g), hint: GAP_FIX[g] })) },
+  { title: "What's in Bloom", checks: [
+    { id: "wib-no-facts", label: "In a What's in Bloom PDF, but no fact values", test: (p) => p.appearances.length > 0 && !p.wib.some(hasWibFacts), fix: "The facts come from the reference sheet only, which doesn't cover these yet. Add them there, or fill the Curated tab by hand." },
+  ] },
+  // "No curated record" is left out: Curator records is the place for that.
+  { title: "Missing content", checks: Object.entries(GAPS).filter(([g]) => g !== "curated").map(([g, label]) =>
+    ({ id: `gap-${g}`, label, test: (p) => p.gaps.has(g), fix: GAP_FIX[g], iris: g === "accession" })) },
+  { title: "Worth a look", checks: [
+    { id: "complete-no-highlight", label: "Complete record, no Plant Highlight", test: (p) => p.complete && !p.highlightLink, fix: "Candidates for a new Plant Highlight." },
+    { id: "tumblr-repeat", label: "On Tumblr 2+ times", test: (p) => p.tumblr.length > 1, fix: "Fine if deliberate; otherwise one post may be under the wrong name." },
+    { id: "wib-repeat", label: "In What's in Bloom 2+ editions", test: (p) => p.appearances.length > 1, fix: "Usually just a reliable bloomer — check the PDF names match." },
+  ] },
 ];
 
-function dashTile(id) {
-  for (const sec of DASH_SECTIONS) for (const t of sec.tiles) if (t.id === id) return t;
-  return DASH_SECTIONS[0].tiles[1];
+function cleanupGroups() {
+  return CLEANUP_GROUPS.filter((g) => !g.iris || state.includeIris)
+    .map((g) => ({ ...g, checks: g.checks.filter((c) => !c.iris || state.includeIris) }));
+}
+function findCleanupCheck(id) {
+  for (const g of cleanupGroups()) for (const c of g.checks) if (c.id === id) return c;
+  return null;
+}
+function cleanupCount(c) {
+  return c.dupes ? getDupes().length : state.idx.list.reduce((n, p) => n + (c.test(p) ? 1 : 0), 0);
 }
 
-/* ---------- filtering the dashboard list ----------
-   The cards choose WHICH question is being asked (one at a time, her
-   call); these narrow the answer. Everything is computed from the plant
+function renderCleanup() {
+  const active = state.cleanupCheck && findCleanupCheck(state.cleanupCheck);
+  const groups = cleanupGroups().map((g) => ({ ...g, rows: g.checks.map((c) => ({ c, n: cleanupCount(c) })) }));
+  const clear = groups.flatMap((g) => g.rows.filter((r) => !r.n).map((r) => r.c.label));
+  return `<h1 class="page-title">Data cleanup</h1>
+    <p class="muted">Each item is a kind of problem and how to fix it. Open one to work through its plants — click a plant to fix it in the side panel, and it leaves the list.</p>
+    ${groups.map((g) => {
+      const open = g.rows.filter((r) => r.n);
+      if (!open.length) return "";
+      return `<h2 class="dash-h">${esc(g.title)}</h2>${open.map(({ c, n }) => {
+        const on = active && active.id === c.id;
+        return `<div class="check ${on ? "active" : ""}" data-action="cleanup-check" data-check="${c.id}">
+          <div class="n">${n.toLocaleString()}</div><div><div class="t">${esc(c.label)}</div><div class="fix">${esc(c.fix || "")}</div></div></div>
+          ${on ? `<div class="cleanup-list">${c.dupes ? renderDuplicates(true) : renderCleanupList(c)}</div>` : ""}`;
+      }).join("")}`;
+    }).join("")}
+    ${clear.length ? `<p class="faint" style="margin-top:18px">Nothing to fix: ${esc(clear.join(" · "))}.</p>` : ""}`;
+}
+
+function renderCleanupList(c) {
+  const total = state.idx.list.filter(c.test).length;
+  return `${total > 10 ? `<div class="toolbar"><input class="input" id="cleanup-q" type="search" placeholder="Find a plant in this list…" value="${attr(state.cleanupQ)}" autocomplete="off" style="max-width:300px"></div>` : ""}
+    ${cleanupRows(c)}`;
+}
+
+// Only this part is swapped while typing, so the search box keeps focus.
+function cleanupRows(c) {
+  const q = state.cleanupQ.trim().toLowerCase();
+  const all = state.idx.list.filter(c.test);
+  const list = (q ? all.filter((p) => p.haystack.includes(q)) : all).sort((a, b) => a.sortName.localeCompare(b.sortName));
+  const shown = list.slice(0, state.cleanupLimit);
+  return `<div id="cleanup-rows">
+    ${q ? `<div class="muted" style="margin-bottom:6px">${list.length.toLocaleString()} of ${all.length.toLocaleString()}</div>` : ""}
+    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th></tr></thead><tbody>
+      ${shown.map((p) => `<tr class="clickable ${state.selectedKey === p.key ? "selected" : ""}" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">No plant in this list matches.</div>`}
+    ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-cleanup">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}
+  </div>`;
+}
+
+function refreshCleanupRows() {
+  const el = document.getElementById("cleanup-rows");
+  const c = findCleanupCheck(state.cleanupCheck);
+  if (!el || !c || c.dupes) { renderMain(); return; }
+  const tmp = document.createElement("div");
+  tmp.innerHTML = cleanupRows(c);
+  el.replaceWith(tmp.firstElementChild);
+}
+
+/* ---------- filtering the Curator records list ----------
+   The status buttons choose which records; these narrow the answer. Everything is computed from the plant
    index, so filtering costs nothing and needs no round trip. */
 const DASH_FILTER_DEFAULTS = {
   q: "", genus: "", family: "", source: "", curated: "", gap: "",
@@ -2521,53 +2614,78 @@ function renderDashFilters() {
     for (const p of state.idx.list) { const v = pick(p); if (v) m.set(v, (m.get(v) || 0) + 1); }
     return [...m].sort((a, b) => a[0].localeCompare(b[0])).map(([v, n]) => [v, `${v} (${n})`]);
   };
-  const locations = [...new Set(state.idx.list.flatMap((p) => [...plantLocationCodes(p)]))].sort()
-    .map((c) => [c, locationName(c) ? `${c} — ${locationName(c)}` : c]);
+  const iris = state.includeIris;
+  const locations = iris ? [...new Set(state.idx.list.flatMap((p) => [...plantLocationCodes(p)]))].sort()
+    .map((c) => [c, locationName(c) ? `${c} — ${locationName(c)}` : c]) : [];
   const yesNo = (label) => [["yes", `Has ${label}`], ["no", `No ${label}`]];
+  // The rest stay one click away rather than on screen: v1.13.0 was about
+  // the home page being too much at once. Open by itself if one is in use.
+  const SECONDARY = ["gap", "status", "nursery", "photo", "description", "accession", "gps"];
+  const more = state.homeMoreFilters || SECONDARY.some((k) => f[k] !== DASH_FILTER_DEFAULTS[k]);
   return `<div class="toolbar">
       <input class="input" id="dash-q" type="search" placeholder="Search name, description, accession…" value="${attr(f.q)}" style="max-width:240px" autocomplete="off">
       <select data-dashf="genus">${optionList(counts((p) => p.genus), f.genus, "All genera")}</select>
       <select data-dashf="family">${optionList(counts((p) => p.family), f.family, "All families")}</select>
-      <select data-dashf="source">${optionList([["tumblr", "Has Tumblr"], ["website", "Has Plant Highlight"], ["wib", "Has What's in Bloom"], ["irisbg", "Has IrisBG"]], f.source, "All sources")}</select>
-      <select data-dashf="gap">${optionList(Object.entries(GAPS), f.gap, "Any completeness")}</select>
+      <select data-dashf="source">${optionList(sourceOptions(), f.source, "All sources")}</select>
+      ${iris ? `<select data-dashf="location" ${locations.length ? "" : "disabled title='Locations come from IrisBG plantings'"}>${optionList(locations, f.location, "All locations")}</select>` : ""}
+      ${more ? `
+      <select data-dashf="gap">${optionList(activeGaps(), f.gap, "Any completeness")}</select>
       <select data-dashf="status">${optionList(BOTANICAL_STATUS, f.status, "Any name status")}</select>
       <select data-dashf="nursery">${optionList(Object.entries(NURSERY_LABELS), f.nursery, "Any nursery")}</select>
-      <select data-dashf="location" ${locations.length ? "" : "disabled title='Locations come from IrisBG plantings'"}>${optionList(locations, f.location, "All locations")}</select>
-      <select data-dashf="curated">${optionList([["yes", "Curated"], ["no", "Not curated"]], f.curated, "Curated or not")}</select>
       <select data-dashf="photo">${optionList(yesNo("photo"), f.photo, "Photo or not")}</select>
       <select data-dashf="description">${optionList(yesNo("description"), f.description, "Description or not")}</select>
-      <select data-dashf="accession">${optionList(yesNo("accession"), f.accession, "Accession or not")}</select>
-      <select data-dashf="gps">${optionList(yesNo("GPS"), f.gps, "GPS or not")}</select>
+      ${iris ? `<select data-dashf="accession">${optionList(yesNo("accession"), f.accession, "Accession or not")}</select>
+      <select data-dashf="gps">${optionList(yesNo("GPS"), f.gps, "GPS or not")}</select>` : ""}`
+      : `<button class="btn link" data-action="more-home-filters">More filters</button>`}
       ${dashFiltersActive() ? `<button class="btn link" data-action="clear-dash-filters">Clear filters</button>` : ""}
     </div>`;
 }
 
+/* ---------- Curator records (home) ----------
+   v1.13.0 replaced the 30-tile dashboard. Every plant, seen through its
+   curated record: not started, how many fields to go, or complete. */
+const HOME_STATUS = [["", "All plants"], ["none", "Not started"], ["progress", "In progress"], ["complete", "Complete"]];
+function curatedState(p) { return !p.taxon ? "none" : p.complete ? "complete" : "progress"; }
+
+function curatedCell(p) {
+  if (!p.taxon) return `<span class="pill">Not started</span>`;
+  if (p.complete) return `<span class="pill sage">Complete</span>`;
+  const m = p.missing;
+  return `<span class="pill sky">${plural(m.length, "field")} to go</span> <span class="faint">${esc(m.slice(0, 3).join(", ") + (m.length > 3 ? "…" : ""))}</span>`;
+}
+
+function homeFacts() {
+  const list = state.idx.list;
+  const n = (test) => list.reduce((c, p) => c + (test(p) ? 1 : 0), 0).toLocaleString();
+  const parts = [`${list.length.toLocaleString()} plants`, `${n((p) => p.photo)} with a picture`, `${n((p) => p.tumblr.length)} on Tumblr`,
+    `${n((p) => p.highlightLink)} with a Plant Highlight`, `${n((p) => p.hasWib)} in What's in Bloom`];
+  if (state.includeIris) parts.push(`${n((p) => p.hasIris)} in IrisBG`);
+  return parts.join(" · ");
+}
+
 function dashList() {
-  const current = dashTile(state.dashTile);
-  const list = state.idx.list.filter(current.test).filter((p) => dashFilterMatch(p, state.dashFilters))
-    .sort((a, b) => a.sortName.localeCompare(b.sortName));
+  const status = state.homeStatus;
+  const label = (HOME_STATUS.find(([v]) => v === status) || HOME_STATUS[0])[1];
+  const inStatus = state.idx.list.filter((p) => !status || curatedState(p) === status);
+  const list = inStatus.filter((p) => dashFilterMatch(p, state.dashFilters)).sort((a, b) => a.sortName.localeCompare(b.sortName));
   const shown = list.slice(0, state.dashLimit);
-  const tileTotal = state.idx.list.filter(current.test).length;
   return `<div id="dash-list-body">
-    <h2 class="dash-h">${esc(current.label)} · ${list.length.toLocaleString()}${list.length !== tileTotal ? ` <span class="faint">of ${tileTotal.toLocaleString()}</span>` : ""}</h2>
-    ${current.hint ? `<div class="notice">${esc(current.hint)}</div>` : ""}
-    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Sources</th><th>Gaps</th></tr></thead><tbody>
-      ${shown.map((p) => `<tr class="clickable" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td><td>${esc(sourceSummary(p))}</td>
-        <td>${[...p.gaps].map((g) => `<span class="pill gold">${esc(GAPS[g])}</span>`).join(" ")}${p.taxon && !p.complete ? ` <span class="pill sky" title="${attr(p.missing.join(", "))}">${plural(p.missing.length, "curated field")} to go</span>` : ""}</td></tr>`).join("")}
-    </tbody></table></div>` : `<div class="empty">${dashFiltersActive() ? "No plants match the card and these filters together." : "No plants."}</div>`}
+    <h2 class="dash-h">${esc(label)} · ${list.length.toLocaleString()}${list.length !== inStatus.length ? ` <span class="faint">of ${inStatus.length.toLocaleString()}</span>` : ""}</h2>
+    ${list.length ? `<div class="table-wrap"><table class="sheet"><thead><tr><th>Plant</th><th>Curated record</th><th>Family</th><th>Sources</th></tr></thead><tbody>
+      ${shown.map((p) => `<tr class="clickable ${state.selectedKey === p.key ? "selected" : ""}" data-action="select" data-key="${attr(p.key)}"><td class="name">${esc(p.displayName)}</td>
+        <td>${curatedCell(p)}</td><td>${esc(p.family)}</td><td class="faint">${esc(sourceSummary(p))}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">${dashFiltersActive() ? "No plants match these filters." : "No plants."}</div>`}
     ${list.length > shown.length ? `<div class="more"><button class="btn" data-action="more-dash">Show more (${(list.length - shown.length).toLocaleString()} left)</button></div>` : ""}
   </div>`;
 }
 
 function renderDashboard() {
-  const plants = state.idx.list;
-  const current = dashTile(state.dashTile);
-  const sections = DASH_SECTIONS.map((sec) => `<h2 class="dash-h">${esc(sec.title)}</h2>
-    <div class="stat-grid">${sec.tiles.map((t) => {
-      const n = t.id === "total" ? plants.length : plants.reduce((c, p) => c + (t.test(p) ? 1 : 0), 0);
-      return `<div class="stat clickable ${t.id === current.id ? "active" : ""}" data-action="dash-tile" data-tile="${t.id}"><div class="n">${n.toLocaleString()}</div><div class="l">${esc(t.label)}</div></div>`;
-    }).join("")}</div>`).join("");
-  return `<h1 class="page-title">Dashboard</h1>${sections}
+  const counts = { none: 0, progress: 0, complete: 0 };
+  for (const p of state.idx.list) counts[curatedState(p)]++;
+  return `<h1 class="page-title">Curator records</h1>
+    <p class="home-facts">${esc(homeFacts())}</p>
+    <div class="toolbar"><div class="seg">${HOME_STATUS.map(([v, l]) =>
+      `<button class="${state.homeStatus === v ? "active" : ""}" data-action="home-status" data-status="${v}">${esc(l)}${v ? ` (${counts[v].toLocaleString()})` : ""}</button>`).join("")}</div></div>
     <div id="dash-list">${renderDashFilters()}${dashList()}</div>`;
 }
 
@@ -3216,7 +3334,8 @@ function renderImportScreen() {
    give each a real name here; sub-areas default their parent to the bed
    they were seen under.
    ========================================================= */
-function renderLocations() {
+function renderLocations(embedded = false) {
+  const title = embedded ? "" : `<h1 class="page-title">Garden locations</h1>`;
   const counts = new Map();
   for (const pl of state.data.plantings) {
     for (const [code, parent] of [[pl.bed, null], [pl.sub_location, pl.bed]]) {
@@ -3229,9 +3348,9 @@ function renderLocations() {
   const named = new Map(state.data.garden_locations.map((g) => [g.code, g]));
   for (const g of state.data.garden_locations) if (!counts.has(g.code)) counts.set(g.code, { code: g.code, parent: g.parent_code, n: 0 });
   const list = [...counts.values()].sort((a, b) => String(a.parent || a.code).localeCompare(String(b.parent || b.code), undefined, { numeric: true }) || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || a.code.localeCompare(b.code, undefined, { numeric: true }));
-  if (!list.length) return `<h1 class="page-title">Garden locations</h1><div class="empty">Location codes appear here after the first IrisBG import.</div>`;
+  if (!list.length) return `${title}<div class="empty">Location codes appear here after the first IrisBG import.</div>`;
   const unnamed = list.filter((l) => !(named.get(l.code) || {}).name).length;
-  return `<h1 class="page-title">Garden locations</h1>
+  return `${title}
     <p class="muted">${list.length} codes from IrisBG · ${unnamed} still need a name. Names save when you leave the field.</p>
     <div class="table-wrap"><table class="sheet"><thead><tr><th>Code</th><th>Within</th><th>Plantings</th><th>Name</th><th>Notes</th></tr></thead><tbody>
     ${list.map((l) => { const g = named.get(l.code) || {}; return `<tr><td><strong>${esc(l.code)}</strong></td><td>${esc(g.parent_code || l.parent || "")}</td><td>${l.n}</td>
@@ -3256,13 +3375,13 @@ async function saveLocation(input) {
 }
 
 /* ==================== ADMIN: PICKLISTS, STAFF, IMPORT HISTORY ==================== */
-const LIST_LABELS = { plant_type: "Plant type", light_needs: "Light needs", water_needs: "Water needs", blooming_season: "Blooming season" };
-const LIST_COLUMN = { plant_type: "plant_type", light_needs: "light_needs", water_needs: "water_needs", blooming_season: "blooming_season" };
+const LIST_LABELS = { plant_type: "Plant type", light_needs: "Light needs", water_needs: "Water needs", soil_needs: "Soil needs", blooming_season: "Blooming season" };
+const LIST_COLUMN = { plant_type: "plant_type", light_needs: "light_needs", water_needs: "water_needs", soil_needs: "soil_needs", blooming_season: "blooming_season" };
 
 function renderAdmin() {
   if (!state.me?.is_admin) return `<div class="empty">Admins only.</div>`;
-  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["changes", "Change history"], ["archived", "Archived"], ["picklists", "Picklists"], ["staff", "Staff"]];
-  const body = { import: renderImportScreen, history: renderImportHistory, changes: renderChangeExport, archived: renderArchived, picklists: renderPicklists, staff: renderStaff }[state.adminTab] || renderImportScreen;
+  const tabs = [["import", "IrisBG import"], ["history", "Import history"], ["changes", "Change history"], ["archived", "Archived"], ["picklists", "App Settings"], ["staff", "Staff"]];
+  const body = { import: renderImportScreen, history: renderImportHistory, changes: renderChangeExport, archived: renderArchived, picklists: renderAppSettings, staff: renderStaff }[state.adminTab] || renderImportScreen;
   return `<h1 class="page-title">Admin</h1>
     <div class="seg" style="margin:6px 0 16px">${tabs.map(([t, l]) => `<button class="${state.adminTab === t ? "active" : ""}" data-action="admin-tab" data-tab="${t}">${l}</button>`).join("")}</div>${body()}`;
 }
@@ -3293,19 +3412,41 @@ function taxaUsing(list, value) {
   return state.data.taxa.filter((t) => (Array.isArray(t[col]) ? t[col].includes(value) : t[col] === value));
 }
 
-function renderPicklists() {
-  return Object.entries(LIST_LABELS).map(([list, label]) => {
+/* ---------- App Settings ----------
+   v1.13.0: was "Picklists", every value of every list on screen at once.
+   Now one line per setting, opened with Edit one at a time. Garden
+   locations moved in here from the main nav. */
+function renderAppSettings() {
+  const open = state.settingsOpen;
+  const row = (key, label, summary, editor) => `<div class="box">
+      <div class="row-between"><div style="min-width:0"><h3 style="font-family:var(--serif);margin:0">${esc(label)}</h3>
+        <div class="faint" style="margin-top:2px">${esc(summary)}</div></div>
+        <button class="btn small ${open === key ? "primary" : ""}" data-action="settings-edit" data-key="${key}">${open === key ? "Done" : "Edit"}</button></div>
+      ${open === key ? `<div style="margin-top:10px">${editor()}</div>` : ""}</div>`;
+  const lists = Object.entries(LIST_LABELS).map(([list, label]) => {
+    const vals = listValues(list);
+    const summary = vals.length ? `${plural(vals.length, "value")}: ${vals.slice(0, 6).join(", ")}${vals.length > 6 ? "…" : ""}` : "No values yet";
+    return row(list, label, summary, () => renderPicklistEditor(list));
+  }).join("");
+  const codes = new Set(state.data.plantings.flatMap((pl) => [pl.bed, pl.sub_location]).filter(Boolean));
+  for (const g of state.data.garden_locations) codes.add(g.code);
+  const unnamed = [...codes].filter((c) => !locationName(c)).length;
+  const locSummary = codes.size ? `${plural(codes.size, "location code")} from IrisBG · ${unnamed} still need a name` : "Codes appear after the first IrisBG import";
+  return `<h2 class="dash-h">Picklists</h2>
+    <p class="muted" style="margin-top:0">The choices offered on the Curated tab.</p>${lists}
+    <h2 class="dash-h">Garden locations</h2>
+    ${row("locations", "Bed and area names", locSummary, () => renderLocations(true))}`;
+}
+
+function renderPicklistEditor(list) {
     const opts = state.data.list_options.filter((o) => o.list === list).sort((a, b) => a.sort - b.sort || a.value.localeCompare(b.value));
-    return `<div class="box"><h3 style="font-family:var(--serif);margin:0 0 8px">${label}</h3>
-      ${opts.map((o, i) => { const used = taxaUsing(list, o.value).length; return `<div class="row-between" style="padding:3px 0">
+    return `${opts.map((o, i) => { const used = taxaUsing(list, o.value).length; return `<div class="row-between" style="padding:3px 0">
         <input class="input" style="max-width:280px" data-rename-list="${list}" data-old="${attr(o.value)}" value="${attr(o.value)}">
         <span class="faint">${used ? `used by ${used}` : "unused"}</span>
         <span><button class="btn small" data-action="move-opt" data-list="${list}" data-value="${attr(o.value)}" data-dir="-1" ${i === 0 ? "disabled" : ""}>↑</button>
           <button class="btn small" data-action="move-opt" data-list="${list}" data-value="${attr(o.value)}" data-dir="1" ${i === opts.length - 1 ? "disabled" : ""}>↓</button>
           <button class="btn small danger" data-action="delete-opt" data-list="${list}" data-value="${attr(o.value)}" ${used ? `disabled title="In use — rename it instead"` : ""}>Delete</button></span></div>`; }).join("")}
-      <form class="row-between" data-add-opt="${list}" style="margin-top:6px;justify-content:flex-start"><input class="input" style="max-width:280px" name="value" placeholder="Add a value"><button class="btn small">Add</button></form>
-    </div>`;
-  }).join("");
+      <form class="row-between" data-add-opt="${list}" style="margin-top:6px;justify-content:flex-start"><input class="input" style="max-width:280px" name="value" placeholder="Add a value"><button class="btn small">Add</button></form>`;
 }
 
 async function addOption(form) {
@@ -3495,7 +3636,7 @@ document.addEventListener("click", async (ev) => {
     case "merge-picks": mergePlants([...state.mergePicks], el.dataset.keep); break;
     case "clear-picks": state.mergePicks.clear(); refreshMergeResults(); break;
     case "merge-group": mergeGroup(el.dataset.scope); break;
-    case "cancel-combine": state.view = state.combine?.back || "duplicates"; state.combine = null; render(); break;
+    case "cancel-combine": state.view = state.combine?.back || "cleanup"; state.combine = null; render(); break;
     case "not-dup-group": notDupGroup(Number(el.dataset.group)); break;
     case "not-dup-member": notDupMember(Number(el.dataset.group), el.dataset.key); break;
     case "unmerge": unmerge(el.dataset.alias); break;
@@ -3505,7 +3646,15 @@ document.addEventListener("click", async (ev) => {
     case "count-changes": countChangeExport(); break;
     case "export-changes": runChangeExport(); break;
     case "reset-change-export": state.changeExport = { from: "", to: "", who: "", area: "", op: "", q: "", count: null, busy: false, status: null, error: null }; renderMain(); break;
-    case "dash-tile": state.dashTile = el.dataset.tile; state.dashLimit = 100; renderMain(); document.getElementById("dash-list")?.scrollIntoView({ behavior: "smooth", block: "start" }); break;
+    case "home-status": state.homeStatus = el.dataset.status; state.dashLimit = 100; renderMain(); break;
+    case "more-home-filters": state.homeMoreFilters = true; renderMain(); break;
+    case "cleanup-check":
+      state.cleanupCheck = state.cleanupCheck === el.dataset.check ? null : el.dataset.check;
+      state.cleanupLimit = 100; state.cleanupQ = ""; state.dupQuery = ""; state.dupLimit = 25;
+      renderMain();
+      break;
+    case "settings-edit": state.settingsOpen = state.settingsOpen === el.dataset.key ? null : el.dataset.key; renderMain(); break;
+    case "more-cleanup": state.cleanupLimit += 100; refreshCleanupRows(); break;
     case "more-dash": state.dashLimit += 100; refreshDashList(); break;
     case "clear-dash-filters": state.dashFilters = { ...DASH_FILTER_DEFAULTS }; state.dashLimit = 100; renderMain(); break;
     case "admin-tab": state.adminTab = el.dataset.tab; renderMain(); break;
@@ -3543,6 +3692,9 @@ document.addEventListener("input", (ev) => {
   } else if (t.id === "dash-q") {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { state.dashFilters.q = t.value; state.dashLimit = 100; refreshDashList(); }, 180);
+  } else if (t.id === "cleanup-q") {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { state.cleanupQ = t.value; state.cleanupLimit = 100; refreshCleanupRows(); }, 180);
   } else if (t.id === "change-export-q") {
     state.changeExport.q = t.value;
     state.changeExport.count = null;
@@ -3570,7 +3722,18 @@ document.addEventListener("input", (ev) => {
 
 document.addEventListener("change", (ev) => {
   const t = ev.target;
-  if (t.dataset.dashf) {
+  if (t.id === "iris-toggle") {
+    state.includeIris = t.checked;
+    saveIncludeIris(t.checked);
+    buildIndex();
+    // The open plant may have been IrisBG-only.
+    if (state.selectedKey && !state.idx.list.some((p) => p.key === state.selectedKey)) state.selectedKey = null;
+    state.dashFilters = { ...state.dashFilters, source: state.dashFilters.source === "irisbg" ? "" : state.dashFilters.source, location: "", accession: "", gps: "" };
+    if (state.browse.source === "irisbg") state.browse.source = "";
+    if (state.browse.gap === "accession") state.browse.gap = "";
+    if (state.dashFilters.gap === "accession") state.dashFilters.gap = "";
+    render();
+  } else if (t.dataset.dashf) {
     state.dashFilters[t.dataset.dashf] = t.value;
     state.dashLimit = 100;
     renderMain();
