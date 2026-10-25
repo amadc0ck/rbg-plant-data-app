@@ -81,7 +81,7 @@ img { max-width: 100%; }
    (v1.17.0). Phones already get a full-screen panel from the rule below. */
 @media (min-width: 821px) {
   .layout.full-record .main { display: none; }
-  .layout.full-record .panel { flex: 1; width: auto; max-width: 1040px; margin: 0 auto; position: static; height: auto; overflow: visible; border-left: 0; box-shadow: var(--shadow); }
+  .layout.full-record .panel { flex: 1; width: auto; max-width: 1320px; margin: 0 auto; position: static; height: auto; overflow: visible; border-left: 0; box-shadow: var(--shadow); }
   .layout.full-record .panel-head { top: 92px; }
 }
 @media (max-width: 820px) {
@@ -150,8 +150,17 @@ table.sheet .name { font-family: var(--serif); font-weight: 600; }
 .tabs button { border: 1px solid transparent; background: transparent; padding: 6px 10px; border-radius: 8px 8px 0 0; cursor: pointer; color: var(--ink-soft); white-space: nowrap; }
 .tabs button.active { border-color: var(--line); border-bottom-color: var(--paper); color: var(--ink); background: var(--paper); font-weight: 600; margin-bottom: -9px; padding-bottom: 14px; }
 .panel-body { padding: 14px 18px 40px; }
-.section { margin-bottom: 20px; }
-.section h3 { font-family: var(--serif); font-size: 16px; margin: 0 0 8px; font-weight: 600; }
+/* Each section is its own card (v1.19.0), so where one ends and the next
+   begins is obvious at a glance. */
+.section { margin-bottom: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--paper); }
+.section h3 { font-family: var(--serif); font-size: 16px; margin: 0 0 10px; font-weight: 600; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.section .row-between h3 { border-bottom: 0; padding-bottom: 0; }
+.section > .row-between:first-child { border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 10px; }
+/* Full-page record: the record on the left, its reference material on the right. */
+.record-split { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 18px; align-items: start; }
+.record-side { background: var(--cream); border-radius: 12px; padding: 12px; }
+.record-side .section:last-child { margin-bottom: 0; }
+@media (max-width: 1000px) { .record-split { grid-template-columns: 1fr; } }
 .box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--paper); }
 .box.tinted { background: var(--cream); }
 .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; font-size: 13px; }
@@ -261,7 +270,7 @@ const CONFIG = {
   SUPABASE_URL: "https://jkrsdvjrnsrjowhaobsr.supabase.co",
   PUBLISHABLE_KEY: "sb_publishable_8L7hSU04ICuIa8K6t28gTQ_gLxszZ5y",
 };
-const APP_VERSION = "1.18.0";
+const APP_VERSION = "1.19.0";
 const APP_UPDATED = "2026-10-25";
 const SESSION_KEY = "rbgpcm_session";
 const PAGE_SIZE = 1000;       // PostgREST max rows per response on Supabase
@@ -1294,7 +1303,9 @@ function renderPanel() {
       <div class="pills" style="margin-top:6px">${plantPills(p)}</div>
       <div class="tabs">${tabs.map(([t, l]) => `<button class="${state.tab === t ? "active" : ""}" data-action="tab" data-tab="${t}">${esc(l)}</button>`).join("")}</div>
     </div>
-    <div class="panel-body">${(bodies[state.tab] || renderCuratedTab)(p)}</div>`;
+    <div class="panel-body">${full
+      ? `<div class="record-split"><div class="record-main">${(bodies[state.tab] || renderCuratedTab)(p)}</div><aside class="record-side">${renderRecordSide(p)}</aside></div>`
+      : (bodies[state.tab] || renderCuratedTab)(p)}</div>`;
 }
 
 function thumbs(urls) {
@@ -1463,7 +1474,7 @@ function renderArchiveBox(p) {
       <div style="margin-top:6px"><button class="btn small" data-action="restore-name" data-key="${attr(p.key)}">Restore to the collection</button></div>
     </div></div>`;
   }
-  return `<div class="section"><details><summary class="faint">Archive this name</summary>
+  return `<div class="section"><details><summary style="font-family:var(--serif);font-weight:600;cursor:pointer">Archive this name</summary>
     <form id="archive-form" data-key="${attr(p.key)}" style="margin-top:8px">
       <p class="faint">Takes it out of Browse, the dashboard counts and duplicate suggestions. Nothing is deleted — the Tumblr post, PDF appearance or IrisBG row stays exactly as it was, and you can restore it here at any time.</p>
       <label class="lbl" for="archive-reason">Why</label>
@@ -1854,8 +1865,11 @@ function renderCuratedTab(p) {
     if (f.half && CURATED_FIELDS[i + 1] && CURATED_FIELDS[i + 1].half) { rows.push(`<div class="grid2">${fieldHtml(f)}${fieldHtml(CURATED_FIELDS[i + 1])}</div>`); i++; }
     else rows.push(fieldHtml(f));
   }
-  if (p.archived) return `${renderArchiveBox(p)}${renderNameCheck(p)}`;
-  return `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}
+  // Full page: these sections live in the right-hand column instead
+  // (renderRecordSide), which stays put while the tabs change.
+  const full = isFullRecord();
+  if (p.archived) return full ? renderArchiveBox(p) : `${renderArchiveBox(p)}${renderNameCheck(p)}`;
+  return `${full ? "" : `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}`}
     <div class="section"><div class="row-between"><h3>Curated record</h3>
       <span class="faint">${p.taxon ? `Last edited ${esc(fmtDate(t.updated_at))}${t.updated_by ? ` by ${esc(shortEmail(t.updated_by))}` : ""}` : "Not curated yet — saving creates the record"}</span></div>
       <form id="curated-form" data-key="${attr(p.key)}" autocomplete="off">${rows.join("")}
@@ -1863,8 +1877,14 @@ function renderCuratedTab(p) {
           <span class="faint" id="curated-status"></span><span style="flex:1"></span>
           ${p.taxon && state.me?.is_admin ? `<button type="button" class="btn small danger" data-action="delete-taxon">Delete curated record</button>` : ""}</div>
       </form></div>
-    ${renderAccessionsSection(p)}
+    ${full ? "" : `${renderAccessionsSection(p)}
     ${renderArchiveBox(p)}
+    <div class="section"><h3>Bloom history (${p.appearances.length})</h3>${editionsList(p)}</div>`}`;
+}
+
+function renderRecordSide(p) {
+  return `${renderPanelDupes(p)}${renderNameCheck(p)}${renderNamesSection(p)}${renderAccessionsSection(p)}
+    ${p.archived ? "" : renderArchiveBox(p)}
     <div class="section"><h3>Bloom history (${p.appearances.length})</h3>${editionsList(p)}</div>`;
 }
 
